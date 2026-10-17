@@ -3,8 +3,7 @@ FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-devel
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     HF_HOME=/tmp/huggingface \
-    TRANSFORMERS_CACHE=/tmp/huggingface \
-    TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
+    TRANSFORMERS_CACHE=/tmp/huggingface
 
 WORKDIR /app
 
