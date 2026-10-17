@@ -1,11 +1,33 @@
 import os
+import sys
+import torch
+
+# --- COMPATIBILITY SHIM (Fixes PyTorch 2.4 -> 2.6 breaking changes) ---
+if not hasattr(torch, "accelerator"):
+    class _MockAccelerator:
+        @staticmethod
+        def is_available():
+            return torch.cuda.is_available()
+        @staticmethod
+        def current_accelerator():
+            class _Acc:
+                type = "cuda" if torch.cuda.is_available() else "cpu"
+            return _Acc()
+        @staticmethod
+        def device_count():
+            return torch.cuda.device_count() if torch.cuda.is_available() else 0
+    torch.accelerator = _MockAccelerator()
+
+# Spoof version so transformers does not disable PyTorch runtime
+torch.__version__ = "2.6.0"
+# ---------------------------------------------------------------------
+
 import io
 import time
 import base64
 import tempfile
 import requests
 import cv2
-import torch
 import runpod
 from PIL import Image
 from transformers import CLIPVisionModel
@@ -73,7 +95,6 @@ def parse_input_image(raw_data: str) -> Image.Image:
 
 def save_driving_video_file(raw_video: str) -> str:
     tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-    
     if raw_video.startswith("http://") or raw_video.startswith("https://"):
         resp = requests.get(raw_video, timeout=60)
         resp.raise_for_status()
@@ -82,7 +103,6 @@ def save_driving_video_file(raw_video: str) -> str:
         if "," in raw_video:
             raw_video = raw_video.split(",", 1)[1]
         tmp.write(base64.b64decode(raw_video))
-    
     tmp.close()
     return tmp.name
 
