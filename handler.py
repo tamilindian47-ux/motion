@@ -6,7 +6,6 @@ import tempfile
 import requests
 import cv2
 import torch
-import numpy as np
 import runpod
 from PIL import Image
 from transformers import CLIPVisionModel
@@ -73,7 +72,6 @@ def parse_input_image(raw_data: str) -> Image.Image:
     return Image.open(io.BytesIO(base64.b64decode(raw_data))).convert("RGB")
 
 def save_driving_video_file(raw_video: str) -> str:
-    """Saves raw video string (URL or base64) to a local temp file and returns path."""
     tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
     
     if raw_video.startswith("http://") or raw_video.startswith("https://"):
@@ -89,12 +87,10 @@ def save_driving_video_file(raw_video: str) -> str:
     return tmp.name
 
 def inspect_driving_video(video_path: str):
-    """Extracts FPS and total frames from the driving video."""
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 16
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
-    # Lock generation to 49 or 81 frames to fit Wan DiT temporal block constraints
     usable_frames = 81 if frame_count >= 81 else 49
     return int(fps), usable_frames
 
@@ -115,11 +111,11 @@ def handler(job):
     target_h = int(job_input.get("height", 1280))
     target_w, target_h = safe_dimensions(target_w, target_h)
 
-    # 1. Decode Character Image
+    # 1. Parse Image
     character_img = parse_input_image(char_image_raw)
     character_img = character_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
-    # 2. Extract Motion Properties from Driving Video
+    # 2. Extract Duration and FPS from Driving Video
     temp_driving_path = save_driving_video_file(driving_video_raw)
     fps, num_frames = inspect_driving_video(temp_driving_path)
     if os.path.exists(temp_driving_path):
