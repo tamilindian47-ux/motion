@@ -25,10 +25,9 @@ RUN git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.
     && git clone --depth 1 https://github.com/city96/ComfyUI-GGUF.git /app/ComfyUI/custom_nodes/ComfyUI-GGUF \
     && git clone --depth 1 https://github.com/kijai/ComfyUI-KJNodes.git /app/ComfyUI/custom_nodes/ComfyUI-KJNodes
 
-# Install custom node dependencies (CRITICAL for UnetLoaderGGUF and video encoding)
+# Install custom node dependencies (including gguf for UnetLoaderGGUF)
 RUN pip install --no-cache-dir gguf imageio-ffmpeg opencv-python-headless \
-    && pip install --no-cache-dir -r /app/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt \
-    && pip install --no-cache-dir -r /app/ComfyUI/custom_nodes/ComfyUI-KJNodes/requirements.txt
+    && pip install --no-cache-dir -r /app/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
