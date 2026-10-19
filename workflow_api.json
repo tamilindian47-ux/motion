@@ -1,7 +1,7 @@
 {
   "1": {
     "inputs": {
-      "unet_name": "scail-2-q4_k_m.gguf"
+      "unet_name": "SCAIL-2-Q4_K_M.gguf"
     },
     "class_type": "UnetLoaderGGUF"
   },
