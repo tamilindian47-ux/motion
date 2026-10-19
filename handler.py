@@ -23,7 +23,7 @@ READY = False
 def download_models(job):
     """Fetch weights inside the worker job, reporting progress to RunPod."""
     models_to_fetch = [
-        ("realrebelai/SCAIL-2_GGUF", "scail-2-q4_k_m.gguf", COMFY_ROOT / "models" / "unet"),
+        ("realrebelai/SCAIL-2_GGUF", "SCAIL-2-Q4_K_M.gguf", COMFY_ROOT / "models" / "unet"),
         ("Comfy-Org/Wan_2.1_ComfyUI_repackaged", "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", COMFY_ROOT / "models" / "clip"),
         ("Comfy-Org/Wan_2.1_ComfyUI_repackaged", "split_files/clip_vision/clip_vision_h.safetensors", COMFY_ROOT / "models" / "clip_vision"),
         ("Kijai/WanVideo_comfy", "Wan2_1_VAE_bf16.safetensors", COMFY_ROOT / "models" / "vae")
