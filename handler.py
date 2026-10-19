@@ -2,7 +2,6 @@ import base64
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -79,12 +78,11 @@ def model():
         local_dir=str(MODEL), max_workers=4,
         ignore_patterns=["*FLUX*", "*FLUX*/**", "*.git*"],
     )
-    required = ["process_checkpoint/pose2d/vitpose_h_wholebody.onnx",
-                "process_checkpoint/det/yolov10m.onnx",
-                "process_checkpoint/sam2/sam2_hiera_large.pt"]
-    missing = [name for name in required if not (MODEL / name).is_file()]
-    if missing:
-        raise RuntimeError("Missing checkpoints: " + ", ".join(missing))
+    check = MODEL / "process_checkpoint"
+    if not check.is_dir() or not any(check.iterdir()):
+        raise RuntimeError("process_checkpoint folder missing or empty in " + str(MODEL))
+    LOG.info("Model root: %s", sorted(p.name for p in MODEL.iterdir()))
+    LOG.info("process_checkpoint: %s", sorted(p.name for p in check.iterdir()))
     READY = True
 
 
@@ -124,8 +122,7 @@ def handler(job):
             model()
             pre = [sys.executable, PRE, "--ckpt_path", MODEL / "process_checkpoint",
                    "--video_path", video, "--refer_path", image,
-                   "--save_path", processed, "--resolution_area", width, height,
-                   "--fps", "16"]
+                   "--save_path", processed, "--resolution_area", width, height]
             if mode == "replace":
                 pre += ["--replace_flag", "--iterations", "3", "--k", "7",
                         "--w_len", "1", "--h_len", "1"]
