@@ -17,15 +17,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone ComfyUI Core
-RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git /app/ComfyUI
+RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git /app/ComfyUI \
+    && pip install --no-cache-dir -r /app/ComfyUI/requirements.txt
 
-# Install ComfyUI Core dependencies
-RUN pip install --no-cache-dir -r /app/ComfyUI/requirements.txt
-
-# Clone required custom nodes: Video I/O and GGUF model loader
+# Clone required custom nodes
 RUN git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /app/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite \
     && git clone --depth 1 https://github.com/city96/ComfyUI-GGUF.git /app/ComfyUI/custom_nodes/ComfyUI-GGUF \
     && git clone --depth 1 https://github.com/kijai/ComfyUI-KJNodes.git /app/ComfyUI/custom_nodes/ComfyUI-KJNodes
+
+# Install custom node dependencies (CRITICAL for UnetLoaderGGUF and video encoding)
+RUN pip install --no-cache-dir gguf imageio-ffmpeg opencv-python-headless \
+    && pip install --no-cache-dir -r /app/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt \
+    && pip install --no-cache-dir -r /app/ComfyUI/custom_nodes/ComfyUI-KJNodes/requirements.txt
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
