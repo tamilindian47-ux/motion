@@ -6,6 +6,7 @@ import base64
 import shutil
 import urllib.request
 import urllib.parse
+import urllib.error
 import subprocess
 from pathlib import Path
 import runpod
@@ -21,11 +22,15 @@ COMFY_PROC = None
 READY = False
 
 def download_models(job):
-    """Fetch weights inside the worker job, reporting progress to RunPod."""
+    """Download required models into ComfyUI directories if not already present."""
     models_to_fetch = [
+        # GGUF Diffusion Model (exact uppercase name)
         ("realrebelai/SCAIL-2_GGUF", "SCAIL-2-Q4_K_M.gguf", COMFY_ROOT / "models" / "unet"),
+        # Text Encoder (umt5-xxl FP8)
         ("Comfy-Org/Wan_2.1_ComfyUI_repackaged", "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", COMFY_ROOT / "models" / "clip"),
+        # CLIP Vision
         ("Comfy-Org/Wan_2.1_ComfyUI_repackaged", "split_files/clip_vision/clip_vision_h.safetensors", COMFY_ROOT / "models" / "clip_vision"),
+        # Wan VAE
         ("Kijai/WanVideo_comfy", "Wan2_1_VAE_bf16.safetensors", COMFY_ROOT / "models" / "vae")
     ]
 
@@ -35,7 +40,7 @@ def download_models(job):
         target_path = dest_dir / local_name
 
         if not target_path.exists() or target_path.stat().st_size == 0:
-            msg = f"Downloading {local_name} from {repo} to ephemeral disk..."
+            msg = f"Downloading {local_name} from {repo} to worker disk..."
             print(f"[Loader] {msg}", flush=True)
             try:
                 runpod.serverless.progress_update(job, {"stage": msg})
@@ -53,7 +58,7 @@ def download_models(job):
             print(f"[Loader] {local_name} ready.", flush=True)
 
 def ensure_comfy_ready(job):
-    """Ensure models exist and ComfyUI background process is active."""
+    """Ensure weights exist and headless ComfyUI server is actively responding."""
     global COMFY_PROC, READY
     if READY:
         return
@@ -64,7 +69,7 @@ def ensure_comfy_ready(job):
     download_models(job)
 
     if COMFY_PROC is None:
-        print("[Server] Starting headless ComfyUI on port 8188...", flush=True)
+        print("[Server] Launching headless ComfyUI on port 8188...", flush=True)
         cmd = [
             sys.executable,
             str(COMFY_ROOT / "main.py"),
@@ -75,7 +80,7 @@ def ensure_comfy_ready(job):
         ]
         COMFY_PROC = subprocess.Popen(cmd, cwd=str(COMFY_ROOT))
 
-        # Wait for local HTTP API readiness
+        # Poll API until the server is listening
         for _ in range(60):
             try:
                 with urllib.request.urlopen(f"{SERVER_URL}/system_stats", timeout=2) as resp:
@@ -89,12 +94,23 @@ def ensure_comfy_ready(job):
         raise RuntimeError("ComfyUI server failed to respond within 60s.")
 
 def queue_prompt(prompt_workflow):
+    """Send execution graph to ComfyUI, unwrapping validation errors on failure."""
     payload = json.dumps({"prompt": prompt_workflow}).encode("utf-8")
-    req = urllib.request.Request(f"{SERVER_URL}/prompt", data=payload, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req) as response:
-        return json.loads(response.read().decode("utf-8"))
+    req = urllib.request.Request(
+        f"{SERVER_URL}/prompt",
+        data=payload,
+        headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8")
+        print(f"[ComfyUI Validation Error Body]: {error_body}", flush=True)
+        raise RuntimeError(f"ComfyUI prompt rejected (HTTP {e.code}): {error_body}")
 
 def wait_for_execution(prompt_id, timeout=900):
+    """Poll ComfyUI execution history until target generation finishes."""
     start_time = time.time()
     while time.time() - start_time < timeout:
         time.sleep(2)
@@ -108,6 +124,7 @@ def wait_for_execution(prompt_id, timeout=900):
     raise TimeoutError(f"Generation timed out after {timeout} seconds.")
 
 def write_b64_file(raw_data, dest_path):
+    """Decode base64 payload into binary file."""
     if "," in raw_data:
         raw_data = raw_data.split(",", 1)[1]
     decoded = base64.b64decode(raw_data)
@@ -122,17 +139,17 @@ def handler(job):
     if not char_img_b64 or not driving_vid_b64:
         return {"error": "Missing 'character_image' or 'driving_video' base64 payload."}
 
-    # 1. Warm boot models and start ComfyUI server if not already alive
+    # 1. Warm boot models and ensure ComfyUI server is alive
     ensure_comfy_ready(job)
 
-    # 2. Clean previous outputs
+    # 2. Clear old generated media
     for p in OUTPUT_DIR.glob("*.mp4"):
         try:
             p.unlink()
         except Exception:
             pass
 
-    # 3. Write input assets
+    # 3. Write incoming assets
     char_img_path = INPUT_DIR / "character.png"
     driving_vid_path = INPUT_DIR / "driving.mp4"
     write_b64_file(char_img_b64, char_img_path)
@@ -147,14 +164,22 @@ def handler(job):
     w = int(job_input.get("width", 512))
     h = int(job_input.get("height", 512))
 
-    workflow["11"]["inputs"]["steps"] = steps
-    workflow["11"]["inputs"]["seed"] = seed
-    workflow["10"]["inputs"]["width"] = w
-    workflow["10"]["inputs"]["height"] = h
-    workflow["6"]["inputs"]["custom_width"] = w
-    workflow["6"]["inputs"]["custom_height"] = h
+    # Sampler node
+    if "11" in workflow and "inputs" in workflow["11"]:
+        workflow["11"]["inputs"]["steps"] = steps
+        workflow["11"]["inputs"]["seed"] = seed
 
-    print(f"[Job] Submitting prompt to ComfyUI (Steps: {steps}, Seed: {seed})...", flush=True)
+    # Latent space dimensions
+    if "10" in workflow and "inputs" in workflow["10"]:
+        workflow["10"]["inputs"]["width"] = w
+        workflow["10"]["inputs"]["height"] = h
+
+    # Video loader dimensions (Node 8 is VHS_LoadVideo)
+    if "8" in workflow and "inputs" in workflow["8"]:
+        workflow["8"]["inputs"]["custom_width"] = w
+        workflow["8"]["inputs"]["custom_height"] = h
+
+    print(f"[Job] Submitting prompt to ComfyUI (Steps: {steps}, Seed: {seed}, Res: {w}x{h})...", flush=True)
     res = queue_prompt(workflow)
     prompt_id = res.get("prompt_id")
     if not prompt_id:
