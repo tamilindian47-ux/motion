@@ -11,3 +11,4 @@ safetensors>=0.4.5
 sentencepiece>=0.2.0
 timm>=1.0.0
 accelerate>=1.2.0
+gguf>=0.13.0
