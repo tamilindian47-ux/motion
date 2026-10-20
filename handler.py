@@ -6,6 +6,7 @@ import urllib.request
 import torch
 import numpy as np
 from PIL import Image
+import torchvision.transforms.functional as TF
 import runpod
 
 sys.path.insert(0, "/app/MimicMotion")
@@ -15,10 +16,8 @@ MODELS_DIR = os.path.join(STORAGE_ROOT, "mimicmotion_models")
 DWPOSE_DIR = os.path.join(MODELS_DIR, "DWPose")
 SVD_DIR = os.path.join(MODELS_DIR, "SVD")
 CKPT_PATH = os.path.join(MODELS_DIR, "MimicMotion_1-1.pth")
-
 REPO_MODELS_DIR = "/app/MimicMotion/models"
 
-# Global pipeline holder for zero-overhead warm re-use
 PIPELINE = None
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -26,7 +25,6 @@ def ensure_assets():
     os.makedirs(DWPOSE_DIR, exist_ok=True)
     os.makedirs(SVD_DIR, exist_ok=True)
     
-    # DWPose weights
     yolox_path = os.path.join(DWPOSE_DIR, "yolox_l.onnx")
     if not os.path.exists(yolox_path) or os.path.getsize(yolox_path) == 0:
         print("Downloading DWPose YOLOX...")
@@ -37,19 +35,16 @@ def ensure_assets():
         print("Downloading DWPose keypoints...")
         urllib.request.urlretrieve("https://huggingface.co/yzd-v/DWPose/resolve/main/dw-ll_ucoco_384.onnx", dw_path)
         
-    # MimicMotion Checkpoint
     if not os.path.exists(CKPT_PATH) or os.path.getsize(CKPT_PATH) == 0:
         print("Downloading MimicMotion checkpoint...")
         urllib.request.urlretrieve("https://huggingface.co/tencent/MimicMotion/resolve/main/MimicMotion_1-1.pth", CKPT_PATH)
         
-    # SVD Base Model
     svd_marker = os.path.join(SVD_DIR, "model_index.json")
     if not os.path.exists(svd_marker):
         print("Downloading SVD XT 1.1 weights...")
         from huggingface_hub import snapshot_download
         snapshot_download(repo_id="vdo/stable-video-diffusion-img2vid-xt-1-1", local_dir=SVD_DIR)
 
-    # Symlink for DWPose detector
     os.makedirs(REPO_MODELS_DIR, exist_ok=True)
     repo_dwpose = os.path.join(REPO_MODELS_DIR, "DWPose")
     if not os.path.exists(repo_dwpose):
@@ -67,7 +62,7 @@ def get_or_load_pipeline():
     from diffusers import AutoencoderKLTemporalDecoder, UNetSpatioTemporalConditionModel, EulerDiscreteScheduler
     from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
     
-    print("Loading base SVD models into GPU...")
+    print("Loading models to GPU...")
     vae = AutoencoderKLTemporalDecoder.from_pretrained(SVD_DIR, subfolder="vae").to(DEVICE, dtype=torch.float16)
     image_encoder = CLIPVisionModelWithProjection.from_pretrained(SVD_DIR, subfolder="image_encoder").to(DEVICE, dtype=torch.float16)
     feature_extractor = CLIPImageProcessor.from_pretrained(SVD_DIR, subfolder="feature_extractor")
@@ -75,10 +70,7 @@ def get_or_load_pipeline():
     scheduler = EulerDiscreteScheduler.from_pretrained(SVD_DIR, subfolder="scheduler")
     pose_net = PoseNet(noise_latent_channels=unet.config.block_out_channels[0]).to(DEVICE, dtype=torch.float16)
     
-    print("Loading MimicMotion weights...")
     state_dict = torch.load(CKPT_PATH, map_location="cpu", weights_only=False)
-    
-    # Load weights into unet and pose_net directly
     unet_dict = {k.replace("unet.", ""): v for k, v in state_dict.items() if k.startswith("unet.")}
     posenet_dict = {k.replace("pose_net.", ""): v for k, v in state_dict.items() if k.startswith("pose_net.")}
     
@@ -132,42 +124,47 @@ def handler(event):
 
         pipeline = get_or_load_pipeline()
         
-        from mimicmotion.dwpose.preprocess import get_video_pose, get_image_pose
+        from mimicmotion.inference import preprocess
         from mimicmotion.utils.utils import save_to_mp4
         
-        # 1. Process Input Image and Poses directly
-        ref_image = Image.open(input_image_path).convert("RGB")
-        image_pixels = np.array(ref_image)
-        
-        # Extract pose sequence from motion video
-        pose_pixels = get_video_pose(
+        # 1. Official preprocessing (extracts normalized tensors + DWPose pixels)
+        pose_pixels, image_pixels = preprocess(
             input_video_path,
-            image_pixels,
-            sample_stride=sample_stride,
-            resolution=resolution
+            input_image_path,
+            resolution=resolution,
+            sample_stride=sample_stride
         )
         
-        # Clip frames to requested length
-        if len(pose_pixels) > num_frames:
+        if pose_pixels.size(0) > num_frames:
             pose_pixels = pose_pixels[:num_frames]
 
-        generator = torch.Generator(device=DEVICE).manual_seed(seed)
+        # Convert normalized image pixels to list of PIL Images as expected by pipeline
+        pil_images = [TF.to_pil_image(img.to(torch.uint8)) for img in (image_pixels + 1.0) * 127.5]
         
-        # 2. Run diffusion inference directly in PyTorch
-        print("Running motion diffusion inference...")
+        generator = torch.Generator(device=DEVICE)
+        generator.manual_seed(seed)
+        
+        # 2. Call pipeline with exact keyword parameters
         frames = pipeline(
-            ref_image,
-            pose_pixels,
-            num_frames=len(pose_pixels),
+            image=pil_images,
+            image_pose=pose_pixels,
+            num_frames=pose_pixels.size(0),
             tile_size=num_frames,
             tile_overlap=frames_overlap,
+            height=pose_pixels.shape[-2],
+            width=pose_pixels.shape[-1],
+            fps=fps,
+            noise_aug_strength=0.0,
             num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
             generator=generator,
-            output_type="np"
-        ).frames
+            min_guidance_scale=guidance_scale,
+            max_guidance_scale=guidance_scale,
+            decode_chunk_size=8,
+            output_type="pt",
+            device=DEVICE
+        ).frames.cpu()
 
-        # 3. Save directly to MP4
+        # 3. Export to mp4
         save_to_mp4(frames[0], output_video_path, fps=fps)
 
         with open(output_video_path, "rb") as f:
