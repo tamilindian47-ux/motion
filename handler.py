@@ -1,6 +1,6 @@
 import os
 
-# Disable HuggingFace's unstable Xet transfer backend to prevent background writer crashes
+# Disable Hugging Face Xet backend to prevent writer timeouts
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 
@@ -15,11 +15,21 @@ from diffusers.utils import export_to_video
 from huggingface_hub import snapshot_download
 
 STORAGE_ROOT = "/runpod-volume" if os.path.exists("/runpod-volume") else "/app/models_cache"
-MODEL_DIR = os.path.join(STORAGE_ROOT, "ltx_video_model")
+MODEL_DIR = os.path.join(STORAGE_ROOT, "ltx_video_diffusers")
 
 MODEL_ID = "Lightricks/LTX-Video"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 PIPELINE = None
+
+# Exact diffusers files required (ignores all 240GB+ root safetensors)
+DIFFUSERS_ALLOW_PATTERNS = [
+    "model_index.json",
+    "scheduler/*",
+    "text_encoder/*",
+    "tokenizer/*",
+    "transformer/*",
+    "vae/*"
+]
 
 def get_or_load_pipeline():
     global PIPELINE
@@ -29,12 +39,13 @@ def get_or_load_pipeline():
     os.makedirs(MODEL_DIR, exist_ok=True)
     marker = os.path.join(MODEL_DIR, "model_index.json")
 
-    # Download model weights using stable HTTP streaming
+    # Download ONLY the ~12GB diffusers structure to volume storage
     if not os.path.exists(marker):
-        print("Downloading LTX-Video weights via stable HTTP stream...")
+        print("Downloading LTX-Video diffusers subfolders (~12GB)...")
         snapshot_download(
             repo_id=MODEL_ID,
             local_dir=MODEL_DIR,
+            allow_patterns=DIFFUSERS_ALLOW_PATTERNS,
             max_workers=4
         )
 
