@@ -57,6 +57,11 @@ def handler(event):
     num_inference_steps = int(job_input.get("num_inference_steps", 25))
     guidance_scale = float(job_input.get("guidance_scale", 2.0))
     fps = int(job_input.get("fps", 15))
+    num_frames = int(job_input.get("num_frames", 72))
+    resolution = int(job_input.get("resolution", 576))
+    frames_overlap = int(job_input.get("frames_overlap", 6))
+    sample_stride = int(job_input.get("sample_stride", 2))
+    seed = int(job_input.get("seed", 42))
     
     if not ref_image_b64 or not motion_video_b64:
         return {"error": "Both 'ref_image' and 'motion_video' are required."}
@@ -82,9 +87,15 @@ dwpose_dir: "{DWPOSE_DIR}"
 test_case:
   - ref_image_path: "{input_image_path}"
     ref_video_path: "{input_video_path}"
+    num_frames: {num_frames}
+    resolution: {resolution}
+    frames_overlap: {frames_overlap}
     num_inference_steps: {num_inference_steps}
+    noise_aug_strength: 0.0
     guidance_scale: {guidance_scale}
+    sample_stride: {sample_stride}
     fps: {fps}
+    seed: {seed}
 """
         with open(config_path, "w") as f:
             f.write(yaml_content)
@@ -129,4 +140,3 @@ test_case:
             subprocess.run(["rm", "-rf", work_dir])
 
 runpod.serverless.start({"handler": handler})
-
