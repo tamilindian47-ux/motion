@@ -10,20 +10,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     ffmpeg \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# Clone MimicMotion repository
 RUN git clone https://github.com/Tencent/MimicMotion.git /app/MimicMotion
 
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download required weights during Docker build (or place them on /runpod-volume)
+# Pre-download DWPose ONNX models & MimicMotion Checkpoint
 RUN mkdir -p /app/MimicMotion/models/DWPose /app/MimicMotion/models/SVD && \
     wget -q -O /app/MimicMotion/models/DWPose/yolox_l.onnx https://huggingface.co/yzd-v/DWPose/resolve/main/yolox_l.onnx && \
     wget -q -O /app/MimicMotion/models/DWPose/dw-ll_ucoco_384.onnx https://huggingface.co/yzd-v/DWPose/resolve/main/dw-ll_ucoco_384.onnx && \
     wget -q -O /app/MimicMotion/models/MimicMotion_1-1.pth https://huggingface.co/tencent/MimicMotion/resolve/main/MimicMotion_1-1.pth
+
+# Pre-cache Stable Video Diffusion to avoid runtime network errors
+RUN python -c "from diffusers import StableVideoDiffusionPipeline; StableVideoDiffusionPipeline.from_pretrained('stabilityai/stable-video-diffusion-img2vid-xt-1-1')"
 
 COPY handler.py /app/
 
