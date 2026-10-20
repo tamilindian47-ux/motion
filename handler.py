@@ -21,7 +21,7 @@ MODEL_ID = "Lightricks/LTX-Video"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 PIPELINE = None
 
-# Exact diffusers files required (ignores all 240GB+ root safetensors)
+# Download only essential diffusers subfolders (~12GB total)
 DIFFUSERS_ALLOW_PATTERNS = [
     "model_index.json",
     "scheduler/*",
@@ -39,9 +39,8 @@ def get_or_load_pipeline():
     os.makedirs(MODEL_DIR, exist_ok=True)
     marker = os.path.join(MODEL_DIR, "model_index.json")
 
-    # Download ONLY the ~12GB diffusers structure to volume storage
     if not os.path.exists(marker):
-        print("Downloading LTX-Video diffusers subfolders (~12GB)...")
+        print("Downloading LTX-Video diffusers weights (~12GB)...")
         snapshot_download(
             repo_id=MODEL_ID,
             local_dir=MODEL_DIR,
@@ -72,7 +71,14 @@ def handler(event):
     negative_prompt = job_input.get("negative_prompt", "worst quality, blurry, jittery, distorted, cartoon, low resolution")
     num_inference_steps = int(job_input.get("num_inference_steps", 30))
     guidance_scale = float(job_input.get("guidance_scale", 3.0))
-    num_frames = int(job_input.get("num_frames", 121))
+    
+    # Duration configuration: segments * 5 seconds
+    # duration_seconds = 5 -> 1 segment (5s)
+    # duration_seconds = 10 -> 2 segments chained (10s)
+    # duration_seconds = 15 -> 3 segments chained (15s)
+    duration_seconds = int(job_input.get("duration_seconds", 15))
+    num_segments = max(1, min(4, duration_seconds // 5))  # Default 3 segments for 15s
+    
     fps = int(job_input.get("fps", 24))
     width = int(job_input.get("width", 768))
     height = int(job_input.get("height", 512))
@@ -87,31 +93,55 @@ def handler(event):
     output_video_path = os.path.join(work_dir, "output.mp4")
 
     try:
-        input_image = decode_base64_image(image_b64)
+        current_image = decode_base64_image(image_b64)
         
         # Dimensions must be divisible by 32 for LTX VAE
         width = (width // 32) * 32
         height = (height // 32) * 32
-        input_image = input_image.resize((width, height), Image.Resampling.LANCZOS)
+        current_image = current_image.resize((width, height), Image.Resampling.LANCZOS)
 
         pipe = get_or_load_pipeline()
 
-        generator = torch.Generator(device=DEVICE).manual_seed(seed)
+        all_stitched_frames = []
+        frames_per_segment = 121  # ~5.04 seconds @ 24fps
 
-        output = pipe(
-            image=input_image,
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            width=width,
-            height=height,
-            num_frames=num_frames,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator
-        )
+        for segment_idx in range(num_segments):
+            print(f"Generating segment {segment_idx + 1}/{num_segments}...")
+            
+            # Vary seed per segment to maintain forward dynamic motion
+            segment_seed = seed + (segment_idx * 100)
+            generator = torch.Generator(device=DEVICE).manual_seed(segment_seed)
 
-        video_frames = output.frames[0]
-        export_to_video(video_frames, output_video_path, fps=fps)
+            output = pipe(
+                image=current_image,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                width=width,
+                height=height,
+                num_frames=frames_per_segment,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator
+            )
+
+            segment_frames = output.frames[0]
+            
+            # Append frames (drop the first duplicate frame for segments 2+)
+            if segment_idx == 0:
+                all_stitched_frames.extend(segment_frames)
+            else:
+                all_stitched_frames.extend(segment_frames[1:])
+
+            # Extract the last frame as starting image for next segment
+            last_frame = segment_frames[-1]
+            if isinstance(last_frame, Image.Image):
+                current_image = last_frame
+            else:
+                import numpy as np
+                current_image = Image.fromarray((last_frame * 255).astype(np.uint8))
+
+        print(f"Exporting {len(all_stitched_frames)} total frames ({len(all_stitched_frames)/fps:.1f}s) to MP4...")
+        export_to_video(all_stitched_frames, output_video_path, fps=fps)
 
         with open(output_video_path, "rb") as f:
             video_b64 = base64.b64encode(f.read()).decode("utf-8")
@@ -119,7 +149,9 @@ def handler(event):
         return {
             "status": "success",
             "video_base64": video_b64,
-            "filename": "ltx_video_output.mp4"
+            "filename": f"ltx_video_{duration_seconds}s.mp4",
+            "total_frames": len(all_stitched_frames),
+            "duration_seconds": round(len(all_stitched_frames) / fps, 2)
         }
 
     except Exception as e:
