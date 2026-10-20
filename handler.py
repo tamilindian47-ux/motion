@@ -58,9 +58,12 @@ def get_or_load_pipeline():
         
     ensure_assets()
     
+    # Custom Tencent modules that accept pose_latents
+    from mimicmotion.modules.unet import UNetSpatioTemporalConditionModel
     from mimicmotion.modules.pose_net import PoseNet
     from mimicmotion.pipelines.pipeline_mimicmotion import MimicMotionPipeline
-    from diffusers import AutoencoderKLTemporalDecoder, UNetSpatioTemporalConditionModel, EulerDiscreteScheduler
+    
+    from diffusers import AutoencoderKLTemporalDecoder, EulerDiscreteScheduler
     from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
     
     print("Loading models to GPU...")
@@ -144,7 +147,6 @@ def handler(event):
         if pose_pixels.size(0) > num_frames:
             pose_pixels = pose_pixels[:num_frames]
 
-        # Cast pose_pixels to float16 to match pose_net's FP16 weights
         pose_pixels = pose_pixels.to(dtype=torch.float16)
 
         pil_images = [TF.to_pil_image(img.to(torch.uint8)) for img in (image_pixels + 1.0) * 127.5]
