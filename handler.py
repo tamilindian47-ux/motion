@@ -1,4 +1,9 @@
 import os
+
+# Disable HuggingFace's unstable Xet transfer backend to prevent background writer crashes
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+
 import io
 import uuid
 import base64
@@ -9,7 +14,6 @@ from diffusers import LTXImageToVideoPipeline
 from diffusers.utils import export_to_video
 from huggingface_hub import snapshot_download
 
-# Persistent volume or local cache fallback
 STORAGE_ROOT = "/runpod-volume" if os.path.exists("/runpod-volume") else "/app/models_cache"
 MODEL_DIR = os.path.join(STORAGE_ROOT, "ltx_video_model")
 
@@ -25,10 +29,14 @@ def get_or_load_pipeline():
     os.makedirs(MODEL_DIR, exist_ok=True)
     marker = os.path.join(MODEL_DIR, "model_index.json")
 
-    # Download model weights to volume once if not present
+    # Download model weights using stable HTTP streaming
     if not os.path.exists(marker):
-        print("Downloading LTX-Video weights to storage...")
-        snapshot_download(repo_id=MODEL_ID, local_dir=MODEL_DIR)
+        print("Downloading LTX-Video weights via stable HTTP stream...")
+        snapshot_download(
+            repo_id=MODEL_ID,
+            local_dir=MODEL_DIR,
+            max_workers=4
+        )
 
     print("Loading LTXImageToVideoPipeline into GPU (bfloat16)...")
     PIPELINE = LTXImageToVideoPipeline.from_pretrained(
@@ -36,7 +44,6 @@ def get_or_load_pipeline():
         torch_dtype=torch.bfloat16
     ).to(DEVICE)
     
-    # Enable VAE memory slicing for low-VRAM safety
     PIPELINE.enable_vae_slicing()
     return PIPELINE
 
@@ -54,7 +61,7 @@ def handler(event):
     negative_prompt = job_input.get("negative_prompt", "worst quality, blurry, jittery, distorted, cartoon, low resolution")
     num_inference_steps = int(job_input.get("num_inference_steps", 30))
     guidance_scale = float(job_input.get("guidance_scale", 3.0))
-    num_frames = int(job_input.get("num_frames", 121)) # 121 frames = ~5 seconds @ 24fps
+    num_frames = int(job_input.get("num_frames", 121))
     fps = int(job_input.get("fps", 24))
     width = int(job_input.get("width", 768))
     height = int(job_input.get("height", 512))
@@ -71,7 +78,7 @@ def handler(event):
     try:
         input_image = decode_base64_image(image_b64)
         
-        # Dimensions must be divisible by 32 for LTX-Video VAE
+        # Dimensions must be divisible by 32 for LTX VAE
         width = (width // 32) * 32
         height = (height // 32) * 32
         input_image = input_image.resize((width, height), Image.Resampling.LANCZOS)
@@ -80,7 +87,6 @@ def handler(event):
 
         generator = torch.Generator(device=DEVICE).manual_seed(seed)
 
-        print(f"Generating video with prompt: '{prompt}'...")
         output = pipe(
             image=input_image,
             prompt=prompt,
@@ -94,8 +100,6 @@ def handler(event):
         )
 
         video_frames = output.frames[0]
-        
-        # Native diffusers video exporter (H.264 MP4)
         export_to_video(video_frames, output_video_path, fps=fps)
 
         with open(output_video_path, "rb") as f:
