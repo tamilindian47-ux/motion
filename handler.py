@@ -1,162 +1,364 @@
 import os
 
-# Disable Hugging Face Xet backend to prevent writer timeouts
+# Set these before importing Hugging Face libraries.
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 
-import io
-import uuid
+BUILD_VERSION = "ltx-no-slicing-v2"
+print(f"HANDLER BUILD: {BUILD_VERSION}", flush=True)
+
 import base64
-import torch
-from PIL import Image
+import binascii
+import io
+import shutil
+import tempfile
+import threading
+import traceback
+
 import runpod
+import torch
+from PIL import Image, ImageOps
 from diffusers import LTXImageToVideoPipeline
 from diffusers.utils import export_to_video
 from huggingface_hub import snapshot_download
 
-STORAGE_ROOT = "/runpod-volume" if os.path.exists("/runpod-volume") else "/app/models_cache"
-MODEL_DIR = os.path.join(STORAGE_ROOT, "ltx_video_diffusers")
 
 MODEL_ID = "Lightricks/LTX-Video"
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-PIPELINE = None
 
-DIFFUSERS_ALLOW_PATTERNS = [
+# No network volume required.
+# Use /runpod-volume only when one is available; otherwise use local storage.
+STORAGE_ROOT = (
+    "/runpod-volume"
+    if os.path.isdir("/runpod-volume")
+    else "/app/models_cache"
+)
+
+MODEL_DIR = os.path.join(STORAGE_ROOT, "ltx_video_diffusers")
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float32
+
+PIPELINE = None
+PIPELINE_LOCK = threading.Lock()
+
+DOWNLOAD_PATTERNS = [
     "model_index.json",
     "scheduler/*",
     "text_encoder/*",
     "tokenizer/*",
     "transformer/*",
-    "vae/*"
+    "vae/*",
 ]
+
+
+def log(message):
+    print(f"[{BUILD_VERSION}] {message}", flush=True)
+
 
 def get_or_load_pipeline():
     global PIPELINE
+
     if PIPELINE is not None:
         return PIPELINE
 
     os.makedirs(MODEL_DIR, exist_ok=True)
-    marker = os.path.join(MODEL_DIR, "model_index.json")
 
-    # Download model weights to storage once if not present
-    if not os.path.exists(marker):
-        print("Downloading LTX-Video diffusers weights (~12GB)...")
-        snapshot_download(
-            repo_id=MODEL_ID,
-            local_dir=MODEL_DIR,
-            allow_patterns=DIFFUSERS_ALLOW_PATTERNS,
-            max_workers=4
-        )
+    log(f"Model directory: {MODEL_DIR}")
+    log(f"Device: {DEVICE}; dtype: {DTYPE}")
+    log("Checking/downloading model files...")
 
-    print("Loading LTXImageToVideoPipeline into GPU (bfloat16)...")
-    PIPELINE = LTXImageToVideoPipeline.from_pretrained(
+    # Let the downloader check individual files rather than assuming
+    # model_index.json means that every weight file is present.
+    snapshot_download(
+        repo_id=MODEL_ID,
+        local_dir=MODEL_DIR,
+        allow_patterns=DOWNLOAD_PATTERNS,
+        max_workers=4,
+    )
+
+    log("Loading LTXImageToVideoPipeline...")
+
+    # Assign the global only after initialization succeeds.
+    pipeline = LTXImageToVideoPipeline.from_pretrained(
         MODEL_DIR,
-        torch_dtype=torch.bfloat16
-    ).to(DEVICE)
-    
-    # Enable VAE tiling for low-VRAM decoding safety
-    if hasattr(PIPELINE, "vae") and hasattr(PIPELINE.vae, "enable_tiling"):
-        PIPELINE.vae.enable_tiling()
-        
+        torch_dtype=DTYPE,
+        local_files_only=True,
+    )
+
+    pipeline = pipeline.to(DEVICE)
+
+    # Intentionally no enable_vae_slicing() call.
+    # Keep initialization minimal while testing the first successful output.
+
+    PIPELINE = pipeline
+    log("Pipeline loaded.")
+
     return PIPELINE
 
-def decode_base64_image(b64_str: str) -> Image.Image:
-    if "," in b64_str:
-        b64_str = b64_str.split(",")[1]
-    image_bytes = base64.b64decode(b64_str)
-    return Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-def handler(event):
-    job_input = event.get("input", {})
-    
-    image_b64 = job_input.get("image")
-    prompt = job_input.get("prompt", "High quality cinematic motion, smooth camera pan, 4k detailed")
-    negative_prompt = job_input.get("negative_prompt", "worst quality, blurry, jittery, distorted, cartoon, low resolution")
-    num_inference_steps = int(job_input.get("num_inference_steps", 30))
-    guidance_scale = float(job_input.get("guidance_scale", 3.0))
-    
-    duration_seconds = int(job_input.get("duration_seconds", 15))
-    num_segments = max(1, min(4, duration_seconds // 5))  # Default 3 segments for 15s
-    
-    fps = int(job_input.get("fps", 24))
-    width = int(job_input.get("width", 768))
-    height = int(job_input.get("height", 512))
-    seed = int(job_input.get("seed", 42))
+def decode_image(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Input 'image' must be a non-empty base64 string.")
 
-    if not image_b64:
-        return {"error": "Input 'image' (base64) is required."}
+    value = value.strip()
 
-    job_id = str(uuid.uuid4())[:8]
-    work_dir = f"/tmp/{job_id}"
-    os.makedirs(work_dir, exist_ok=True)
-    output_video_path = os.path.join(work_dir, "output.mp4")
+    if value.startswith("data:"):
+        if "," not in value:
+            raise ValueError("Invalid image data URL.")
+
+        header, value = value.split(",", 1)
+
+        if ";base64" not in header.lower():
+            raise ValueError("The image data URL must use base64 encoding.")
+
+    # Allow line breaks or whitespace in a base64 payload.
+    value = "".join(value.split())
 
     try:
-        current_image = decode_base64_image(image_b64)
-        
-        # Dimensions must be divisible by 32 for LTX VAE
-        width = (width // 32) * 32
-        height = (height // 32) * 32
-        current_image = current_image.resize((width, height), Image.Resampling.LANCZOS)
+        raw = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("Could not decode the base64 image.") from exc
 
-        pipe = get_or_load_pipeline()
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            return ImageOps.exif_transpose(image).convert("RGB")
+    except Exception as exc:
+        raise ValueError("Decoded input is not a readable image.") from exc
 
-        all_stitched_frames = []
-        frames_per_segment = 121  # ~5.04 seconds @ 24fps
 
-        for segment_idx in range(num_segments):
-            print(f"Generating segment {segment_idx + 1}/{num_segments}...")
-            
-            segment_seed = seed + (segment_idx * 100)
-            generator = torch.Generator(device=DEVICE).manual_seed(segment_seed)
+def read_int(data, name, default, minimum, maximum):
+    value = data.get(name, default)
 
-            output = pipe(
-                image=current_image,
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                width=width,
-                height=height,
-                num_frames=frames_per_segment,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                generator=generator
+    if isinstance(value, bool):
+        raise ValueError(f"'{name}' must be an integer.")
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"'{name}' must be an integer.") from exc
+
+    if isinstance(value, float) and value != parsed:
+        raise ValueError(f"'{name}' must be an integer.")
+
+    if not minimum <= parsed <= maximum:
+        raise ValueError(
+            f"'{name}' must be between {minimum} and {maximum}."
+        )
+
+    return parsed
+
+
+def read_float(data, name, default, minimum, maximum):
+    try:
+        value = float(data.get(name, default))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"'{name}' must be a number.") from exc
+
+    # This also rejects NaN and infinities.
+    if not minimum <= value <= maximum:
+        raise ValueError(
+            f"'{name}' must be between {minimum} and {maximum}."
+        )
+
+    return value
+
+
+def handler(event):
+    work_dir = None
+
+    try:
+        job_input = event.get("input", {})
+
+        if not isinstance(job_input, dict):
+            raise ValueError("'input' must be a JSON object.")
+
+        current_image = decode_image(job_input.get("image"))
+
+        prompt = job_input.get(
+            "prompt",
+            "High quality cinematic motion, smooth camera movement",
+        )
+
+        negative_prompt = job_input.get(
+            "negative_prompt",
+            "worst quality, blurry, jittery, distorted, low resolution",
+        )
+
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("'prompt' must be a non-empty string.")
+
+        if not isinstance(negative_prompt, str):
+            raise ValueError("'negative_prompt' must be a string.")
+
+        width = read_int(job_input, "width", 768, 256, 1024)
+        height = read_int(job_input, "height", 512, 256, 1024)
+
+        if width % 32 or height % 32:
+            raise ValueError(
+                "'width' and 'height' must be multiples of 32."
             )
 
-            segment_frames = output.frames[0]
-            
-            if segment_idx == 0:
-                all_stitched_frames.extend(segment_frames)
-            else:
-                all_stitched_frames.extend(segment_frames[1:])
+        duration_seconds = read_int(
+            job_input, "duration_seconds", 5, 5, 15
+        )
 
-            last_frame = segment_frames[-1]
-            if isinstance(last_frame, Image.Image):
-                current_image = last_frame
-            else:
-                import numpy as np
-                current_image = Image.fromarray((last_frame * 255).astype(np.uint8))
+        if duration_seconds not in (5, 10, 15):
+            raise ValueError(
+                "'duration_seconds' must be 5, 10, or 15."
+            )
 
-        print(f"Exporting {len(all_stitched_frames)} total frames ({len(all_stitched_frames)/fps:.1f}s) to MP4...")
-        export_to_video(all_stitched_frames, output_video_path, fps=fps)
+        fps = read_int(job_input, "fps", 24, 24, 24)
 
-        with open(output_video_path, "rb") as f:
-            video_b64 = base64.b64encode(f.read()).decode("utf-8")
+        num_inference_steps = read_int(
+            job_input, "num_inference_steps", 30, 1, 100
+        )
+
+        guidance_scale = read_float(
+            job_input, "guidance_scale", 3.0, 1.0, 10.0
+        )
+
+        seed = read_int(
+            job_input, "seed", 42, 0, (2**63) - 1
+        )
+
+        num_segments = duration_seconds // 5
+        frames_per_segment = 121
+        target_frame_count = duration_seconds * fps
+
+        # Fit the reference image without stretching its proportions.
+        current_image = ImageOps.fit(
+            current_image,
+            (width, height),
+            method=Image.Resampling.LANCZOS,
+        )
+
+        work_dir = tempfile.mkdtemp(prefix="ltx_")
+        output_path = os.path.join(work_dir, "output.mp4")
+
+        log(
+            f"Starting job: {duration_seconds}s, {width}x{height}, "
+            f"{num_segments} segment(s), {num_inference_steps} steps"
+        )
+
+        # Serialize access to the shared pipeline in this process.
+        with PIPELINE_LOCK:
+            pipe = get_or_load_pipeline()
+            stitched_frames = []
+
+            with torch.inference_mode():
+                for segment_idx in range(num_segments):
+                    log(
+                        f"Generating segment "
+                        f"{segment_idx + 1}/{num_segments}..."
+                    )
+
+                    generator = torch.Generator(
+                        device=DEVICE
+                    ).manual_seed(seed + segment_idx * 100)
+
+                    result = pipe(
+                        image=current_image,
+                        prompt=prompt.strip(),
+                        negative_prompt=negative_prompt,
+                        width=width,
+                        height=height,
+                        num_frames=frames_per_segment,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        generator=generator,
+                        output_type="pil",
+                    )
+
+                    segment_frames = list(result.frames[0])
+
+                    if not segment_frames:
+                        raise RuntimeError(
+                            f"Segment {segment_idx + 1} returned no frames."
+                        )
+
+                    if not all(
+                        isinstance(frame, Image.Image)
+                        for frame in segment_frames
+                    ):
+                        raise RuntimeError(
+                            "Expected PIL images from output_type='pil'."
+                        )
+
+                    # Use the final frame as the next segment's reference.
+                    current_image = segment_frames[-1].copy()
+
+                    if segment_idx == 0:
+                        stitched_frames.extend(segment_frames)
+                    else:
+                        # Omit the repeated starting frame.
+                        stitched_frames.extend(segment_frames[1:])
+
+                    log(
+                        f"Segment {segment_idx + 1} complete; "
+                        f"{len(stitched_frames)} accumulated frames."
+                    )
+
+                    del result
+
+            if len(stitched_frames) < target_frame_count:
+                raise RuntimeError(
+                    f"Expected at least {target_frame_count} frames, "
+                    f"received {len(stitched_frames)}."
+                )
+
+            # Export exactly the requested duration at 24 fps.
+            stitched_frames = stitched_frames[:target_frame_count]
+
+            log(
+                f"Exporting {len(stitched_frames)} frames "
+                f"at {fps} fps..."
+            )
+
+            export_to_video(
+                stitched_frames,
+                output_path,
+                fps=fps,
+            )
+
+            del stitched_frames
+
+        if (
+            not os.path.isfile(output_path)
+            or os.path.getsize(output_path) == 0
+        ):
+            raise RuntimeError("Video export did not produce a valid file.")
+
+        with open(output_path, "rb") as video_file:
+            video_base64 = base64.b64encode(
+                video_file.read()
+            ).decode("utf-8")
+
+        log("Job complete.")
 
         return {
             "status": "success",
-            "video_base64": video_b64,
+            "build_version": BUILD_VERSION,
+            "video_base64": video_base64,
             "filename": f"ltx_video_{duration_seconds}s.mp4",
-            "total_frames": len(all_stitched_frames),
-            "duration_seconds": round(len(all_stitched_frames) / fps, 2)
+            "total_frames": target_frame_count,
+            "duration_seconds": duration_seconds,
+            "fps": fps,
+            "seed": seed,
         }
 
-    except Exception as e:
-        import traceback
-        return {"error": f"{str(e)}\n{traceback.format_exc()}"}
+    except Exception:
+        log("Job failed:")
+        traceback.print_exc()
+
+        # Propagate the exception so the job is marked failed,
+        # rather than returning a successful result containing an error.
+        raise
 
     finally:
-        if os.path.exists(work_dir):
-            import shutil
-            shutil.rmtree(work_dir)
+        if work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
-runpod.serverless.start({"handler": handler})
+
+if __name__ == "__main__":
+    log("Starting RunPod handler.")
+    runpod.serverless.start({"handler": handler})
