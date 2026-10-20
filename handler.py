@@ -129,3 +129,4 @@ test_case:
             subprocess.run(["rm", "-rf", work_dir])
 
 runpod.serverless.start({"handler": handler})
+
