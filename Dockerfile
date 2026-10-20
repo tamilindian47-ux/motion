@@ -2,6 +2,7 @@ FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
+ENV HF_HUB_ENABLE_HF_TRANSFER=0
 
 WORKDIR /app
 
@@ -26,8 +27,8 @@ RUN mkdir -p /app/MimicMotion/models/DWPose /app/MimicMotion/models/SVD && \
     wget -q -O /app/MimicMotion/models/DWPose/dw-ll_ucoco_384.onnx https://huggingface.co/yzd-v/DWPose/resolve/main/dw-ll_ucoco_384.onnx && \
     wget -q -O /app/MimicMotion/models/MimicMotion_1-1.pth https://huggingface.co/tencent/MimicMotion/resolve/main/MimicMotion_1-1.pth
 
-# Pre-cache Stable Video Diffusion to avoid runtime network errors
-RUN python -c "from diffusers import StableVideoDiffusionPipeline; StableVideoDiffusionPipeline.from_pretrained('stabilityai/stable-video-diffusion-img2vid-xt-1-1')"
+# Download SVD XT 1.1 directly via huggingface-cli snapshot without gated auth locks
+RUN huggingface-cli download vdo/stable-video-diffusion-img2vid-xt-1-1 --local-dir /app/MimicMotion/models/SVD/stable-video-diffusion-img2vid-xt-1-1
 
 COPY handler.py /app/
 
