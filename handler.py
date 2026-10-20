@@ -1,199 +1,89 @@
 import os
 import sys
-import time
-import json
+import uuid
 import base64
-import shutil
-import urllib.request
-import urllib.parse
-import urllib.error
 import subprocess
-from pathlib import Path
 import runpod
-from huggingface_hub import hf_hub_download
 
-COMFY_ROOT = Path("/app/ComfyUI")
-INPUT_DIR = COMFY_ROOT / "input"
-OUTPUT_DIR = COMFY_ROOT / "output"
-COMFY_PORT = 8188
-SERVER_URL = f"http://127.0.0.1:{COMFY_PORT}"
+sys.path.insert(0, "/app/MimicMotion")
 
-COMFY_PROC = None
-READY = False
+def decode_base64_file(b64_str: str, output_path: str):
+    if "," in b64_str:
+        b64_str = b64_str.split(",")[1]
+    data = base64.b64decode(b64_str)
+    with open(output_path, "wb") as f:
+        f.write(data)
 
-def download_models(job):
-    """Download required weights if not already present."""
-    models_to_fetch = [
-        ("realrebelai/SCAIL-2_GGUF", "SCAIL-2-Q4_K_M.gguf", COMFY_ROOT / "models" / "unet"),
-        ("Comfy-Org/Wan_2.1_ComfyUI_repackaged", "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors", COMFY_ROOT / "models" / "clip"),
-        ("Comfy-Org/Wan_2.1_ComfyUI_repackaged", "split_files/clip_vision/clip_vision_h.safetensors", COMFY_ROOT / "models" / "clip_vision"),
-        ("Kijai/WanVideo_comfy", "Wan2_1_VAE_bf16.safetensors", COMFY_ROOT / "models" / "vae")
-    ]
+def encode_file_to_base64(file_path: str) -> str:
+    with open(file_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
 
-    for repo, filename, dest_dir in models_to_fetch:
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        local_name = Path(filename).name
-        target_path = dest_dir / local_name
-
-        if not target_path.exists() or target_path.stat().st_size == 0:
-            msg = f"Downloading {local_name} from {repo} to worker disk..."
-            print(f"[Loader] {msg}", flush=True)
-            try:
-                runpod.serverless.progress_update(job, {"stage": msg})
-            except Exception:
-                pass
-
-            downloaded = hf_hub_download(
-                repo_id=repo,
-                filename=filename,
-                local_dir=str(dest_dir),
-                local_dir_use_symlinks=False
-            )
-            if Path(downloaded) != target_path:
-                shutil.move(downloaded, target_path)
-            print(f"[Loader] {local_name} ready.", flush=True)
-
-def ensure_comfy_ready(job):
-    """Ensure weights exist and ComfyUI background process is listening."""
-    global COMFY_PROC, READY
-    if READY:
-        return
-
-    INPUT_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    download_models(job)
-
-    if COMFY_PROC is None:
-        print("[Server] Starting ComfyUI server on port 8188...", flush=True)
-        cmd = [
-            sys.executable,
-            str(COMFY_ROOT / "main.py"),
-            "--listen", "127.0.0.1",
-            "--port", str(COMFY_PORT),
-            "--disable-auto-launch",
-            "--highvram"
-        ]
-        COMFY_PROC = subprocess.Popen(cmd, cwd=str(COMFY_ROOT))
-
-        for _ in range(60):
-            try:
-                with urllib.request.urlopen(f"{SERVER_URL}/system_stats", timeout=2) as resp:
-                    if resp.status == 200:
-                        print("[Server] ComfyUI ready.", flush=True)
-                        READY = True
-                        return
-            except Exception:
-                time.sleep(1)
-
-        raise RuntimeError("ComfyUI server failed to respond within 60s.")
-
-def queue_prompt(prompt_workflow):
-    """Submit workflow graph and surface validation details on rejection."""
-    payload = json.dumps({"prompt": prompt_workflow}).encode("utf-8")
-    req = urllib.request.Request(
-        f"{SERVER_URL}/prompt",
-        data=payload,
-        headers={"Content-Type": "application/json"}
-    )
+def handler(event):
+    job_input = event.get("input", {})
+    
+    ref_image_b64 = job_input.get("ref_image")
+    motion_video_b64 = job_input.get("motion_video")
+    num_inference_steps = int(job_input.get("num_inference_steps", 25))
+    guidance_scale = float(job_input.get("guidance_scale", 2.0))
+    fps = int(job_input.get("fps", 15))
+    
+    if not ref_image_b64 or not motion_video_b64:
+        return {"error": "Both 'ref_image' and 'motion_video' are required."}
+    
+    job_id = str(uuid.uuid4())[:8]
+    work_dir = f"/tmp/{job_id}"
+    os.makedirs(work_dir, exist_ok=True)
+    
+    input_image_path = os.path.join(work_dir, "ref_image.png")
+    input_video_path = os.path.join(work_dir, "motion_video.mp4")
+    output_video_path = os.path.join(work_dir, "output.mp4")
+    config_path = os.path.join(work_dir, "config.yaml")
+    
     try:
-        with urllib.request.urlopen(req) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8")
-        print(f"[ComfyUI Validation Body]: {error_body}", flush=True)
-        raise RuntimeError(f"ComfyUI prompt rejected (HTTP {e.code}): {error_body}")
-
-def wait_for_execution(prompt_id, timeout=900):
-    """Wait for ComfyUI execution history to produce output."""
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        time.sleep(2)
-        try:
-            with urllib.request.urlopen(f"{SERVER_URL}/history/{prompt_id}") as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                if prompt_id in data:
-                    return data[prompt_id]
-        except Exception:
-            continue
-    raise TimeoutError(f"Generation timed out after {timeout} seconds.")
-
-def write_b64_file(raw_data, dest_path):
-    """Write base64 payload to file."""
-    if "," in raw_data:
-        raw_data = raw_data.split(",", 1)[1]
-    decoded = base64.b64decode(raw_data)
-    with open(dest_path, "wb") as f:
-        f.write(decoded)
-
-def handler(job):
-    job_input = job.get("input", {})
-    char_img_b64 = job_input.get("character_image")
-    driving_vid_b64 = job_input.get("driving_video")
-
-    if not char_img_b64 or not driving_vid_b64:
-        return {"error": "Missing 'character_image' or 'driving_video' base64 payload."}
-
-    ensure_comfy_ready(job)
-
-    # Clean old outputs
-    for p in OUTPUT_DIR.glob("*.mp4"):
-        try:
-            p.unlink()
-        except Exception:
-            pass
-
-    # Save inputs
-    char_img_path = INPUT_DIR / "character.png"
-    driving_vid_path = INPUT_DIR / "driving.mp4"
-    write_b64_file(char_img_b64, char_img_path)
-    write_b64_file(driving_vid_b64, driving_vid_path)
-
-    # Load workflow template
-    with open("/app/workflow_api.json", "r") as f:
-        workflow = json.load(f)
-
-    steps = int(job_input.get("num_inference_steps", 20))
-    seed = int(job_input.get("seed", 42))
-    w = int(job_input.get("width", 512))
-    h = int(job_input.get("height", 512))
-
-    # Node 6: VHS_LoadVideo
-    if "6" in workflow and "inputs" in workflow["6"]:
-        workflow["6"]["inputs"]["custom_width"] = w
-        workflow["6"]["inputs"]["custom_height"] = h
-
-    # Node 10: WanSCAILToVideo
-    if "10" in workflow and "inputs" in workflow["10"]:
-        workflow["10"]["inputs"]["width"] = w
-        workflow["10"]["inputs"]["height"] = h
-
-    # Node 11: KSampler
-    if "11" in workflow and "inputs" in workflow["11"]:
-        workflow["11"]["inputs"]["steps"] = steps
-        workflow["11"]["inputs"]["seed"] = seed
-
-    print(f"[Job] Queueing workflow (Steps: {steps}, Seed: {seed}, Res: {w}x{h})...", flush=True)
-    res = queue_prompt(workflow)
-    prompt_id = res.get("prompt_id")
-    if not prompt_id:
-        return {"error": "Failed to queue workflow", "details": res}
-
-    history = wait_for_execution(prompt_id, timeout=900)
-
-    # Retrieve output
-    mp4_files = list(OUTPUT_DIR.glob("*.mp4"))
-    if not mp4_files:
-        return {"error": "Execution completed but no MP4 was written.", "history": history}
-
-    latest_mp4 = max(mp4_files, key=os.path.getmtime)
-    with open(latest_mp4, "rb") as vf:
-        out_b64 = base64.b64encode(vf.read()).decode("utf-8")
-
-    return {
-        "status": "success",
-        "video_base64": out_b64,
-        "filename": latest_mp4.name
-    }
+        decode_base64_file(ref_image_b64, input_image_path)
+        decode_base64_file(motion_video_b64, input_video_path)
+        
+        # Build YAML configuration for MimicMotion inference
+        yaml_content = f"""
+base_model_path: "stabilityai/stable-video-diffusion-img2vid-xt-1-1"
+ckpt_path: "/app/MimicMotion/models/MimicMotion_1-1.pth"
+dwpose_dir: "/app/MimicMotion/models/DWPose"
+test_case:
+  - ref_image_path: "{input_image_path}"
+    video_path: "{input_video_path}"
+    output_dir: "{work_dir}"
+    num_inference_steps: {num_inference_steps}
+    guidance_scale: {guidance_scale}
+    fps: {fps}
+"""
+        with open(config_path, "w") as f:
+            f.write(yaml_content)
+        
+        cmd = [
+            "python", "/app/MimicMotion/inference.py",
+            "--inference_config", config_path
+        ]
+        
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd="/app/MimicMotion")
+        if proc.returncode != 0:
+            return {"error": f"MimicMotion failed: {proc.stderr}"}
+            
+        generated_files = [os.path.join(work_dir, f) for f in os.listdir(work_dir) if f.endswith(".mp4") and f != "motion_video.mp4"]
+        if not generated_files:
+            return {"error": "Inference completed but output video file was not found."}
+            
+        final_video_b64 = encode_file_to_base64(generated_files[0])
+        return {
+            "status": "success",
+            "video_base64": final_video_b64,
+            "filename": "mimicmotion_output.mp4"
+        }
+        
+    except Exception as e:
+        return {"error": str(e)}
+        
+    finally:
+        if os.path.exists(work_dir):
+            subprocess.run(["rm", "-rf", work_dir])
 
 runpod.serverless.start({"handler": handler})
