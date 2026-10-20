@@ -21,7 +21,6 @@ MODEL_ID = "Lightricks/LTX-Video"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 PIPELINE = None
 
-# Download only essential diffusers subfolders (~12GB total)
 DIFFUSERS_ALLOW_PATTERNS = [
     "model_index.json",
     "scheduler/*",
@@ -39,6 +38,7 @@ def get_or_load_pipeline():
     os.makedirs(MODEL_DIR, exist_ok=True)
     marker = os.path.join(MODEL_DIR, "model_index.json")
 
+    # Download model weights to storage once if not present
     if not os.path.exists(marker):
         print("Downloading LTX-Video diffusers weights (~12GB)...")
         snapshot_download(
@@ -54,7 +54,10 @@ def get_or_load_pipeline():
         torch_dtype=torch.bfloat16
     ).to(DEVICE)
     
-    PIPELINE.enable_vae_slicing()
+    # Enable VAE tiling for low-VRAM decoding safety
+    if hasattr(PIPELINE, "vae") and hasattr(PIPELINE.vae, "enable_tiling"):
+        PIPELINE.vae.enable_tiling()
+        
     return PIPELINE
 
 def decode_base64_image(b64_str: str) -> Image.Image:
@@ -72,10 +75,6 @@ def handler(event):
     num_inference_steps = int(job_input.get("num_inference_steps", 30))
     guidance_scale = float(job_input.get("guidance_scale", 3.0))
     
-    # Duration configuration: segments * 5 seconds
-    # duration_seconds = 5 -> 1 segment (5s)
-    # duration_seconds = 10 -> 2 segments chained (10s)
-    # duration_seconds = 15 -> 3 segments chained (15s)
     duration_seconds = int(job_input.get("duration_seconds", 15))
     num_segments = max(1, min(4, duration_seconds // 5))  # Default 3 segments for 15s
     
@@ -108,7 +107,6 @@ def handler(event):
         for segment_idx in range(num_segments):
             print(f"Generating segment {segment_idx + 1}/{num_segments}...")
             
-            # Vary seed per segment to maintain forward dynamic motion
             segment_seed = seed + (segment_idx * 100)
             generator = torch.Generator(device=DEVICE).manual_seed(segment_seed)
 
@@ -126,13 +124,11 @@ def handler(event):
 
             segment_frames = output.frames[0]
             
-            # Append frames (drop the first duplicate frame for segments 2+)
             if segment_idx == 0:
                 all_stitched_frames.extend(segment_frames)
             else:
                 all_stitched_frames.extend(segment_frames[1:])
 
-            # Extract the last frame as starting image for next segment
             last_frame = segment_frames[-1]
             if isinstance(last_frame, Image.Image):
                 current_image = last_frame
