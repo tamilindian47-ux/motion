@@ -125,11 +125,9 @@ def handler(event):
 
         pipeline = get_or_load_pipeline()
         
-        # Override the DWPose detector with absolute file paths
+        # Override DWPose detector with absolute paths
         from mimicmotion.dwpose.preprocess import dwprocessor
         from mimicmotion.dwpose.wholebody import Wholebody
-        
-        # Re-initialize pose estimation using exact absolute paths on disk
         dwprocessor.args = (YOLOX_PATH, DW_PATH, "cuda:0" if torch.cuda.is_available() else "cpu")
         dwprocessor.pose_estimation = Wholebody(*dwprocessor.args)
         
@@ -145,6 +143,9 @@ def handler(event):
         
         if pose_pixels.size(0) > num_frames:
             pose_pixels = pose_pixels[:num_frames]
+
+        # Cast pose_pixels to float16 to match pose_net's FP16 weights
+        pose_pixels = pose_pixels.to(dtype=torch.float16)
 
         pil_images = [TF.to_pil_image(img.to(torch.uint8)) for img in (image_pixels + 1.0) * 127.5]
         
