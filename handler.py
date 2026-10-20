@@ -124,10 +124,10 @@ def handler(event):
 
         pipeline = get_or_load_pipeline()
         
-        from mimicmotion.inference import preprocess
+        # Corrected import from the repo root
+        from inference import preprocess
         from mimicmotion.utils.utils import save_to_mp4
         
-        # 1. Official preprocessing (extracts normalized tensors + DWPose pixels)
         pose_pixels, image_pixels = preprocess(
             input_video_path,
             input_image_path,
@@ -138,13 +138,11 @@ def handler(event):
         if pose_pixels.size(0) > num_frames:
             pose_pixels = pose_pixels[:num_frames]
 
-        # Convert normalized image pixels to list of PIL Images as expected by pipeline
         pil_images = [TF.to_pil_image(img.to(torch.uint8)) for img in (image_pixels + 1.0) * 127.5]
         
         generator = torch.Generator(device=DEVICE)
         generator.manual_seed(seed)
         
-        # 2. Call pipeline with exact keyword parameters
         frames = pipeline(
             image=pil_images,
             image_pose=pose_pixels,
@@ -164,7 +162,6 @@ def handler(event):
             device=DEVICE
         ).frames.cpu()
 
-        # 3. Export to mp4
         save_to_mp4(frames[0], output_video_path, fps=fps)
 
         with open(output_video_path, "rb") as f:
