@@ -1,7 +1,7 @@
 import os
 import sys
 
-# 1. Force the current working directory to the MimicMotion root
+# Force absolute working directory
 os.chdir("/app/MimicMotion")
 sys.path.insert(0, "/app/MimicMotion")
 
@@ -20,8 +20,8 @@ DWPOSE_DIR = os.path.join(MODELS_DIR, "DWPose")
 SVD_DIR = os.path.join(MODELS_DIR, "SVD")
 CKPT_PATH = os.path.join(MODELS_DIR, "MimicMotion_1-1.pth")
 
-REPO_MODELS_DIR = "/app/MimicMotion/models"
-APP_MODELS_DIR = "/app/models"
+YOLOX_PATH = os.path.join(DWPOSE_DIR, "yolox_l.onnx")
+DW_PATH = os.path.join(DWPOSE_DIR, "dw-ll_ucoco_384.onnx")
 
 PIPELINE = None
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -31,15 +31,13 @@ def ensure_assets():
     os.makedirs(SVD_DIR, exist_ok=True)
     
     # 1. Download DWPose ONNX files
-    yolox_path = os.path.join(DWPOSE_DIR, "yolox_l.onnx")
-    if not os.path.exists(yolox_path) or os.path.getsize(yolox_path) == 0:
+    if not os.path.exists(YOLOX_PATH) or os.path.getsize(YOLOX_PATH) == 0:
         print("Downloading DWPose YOLOX...")
-        urllib.request.urlretrieve("https://huggingface.co/yzd-v/DWPose/resolve/main/yolox_l.onnx", yolox_path)
+        urllib.request.urlretrieve("https://huggingface.co/yzd-v/DWPose/resolve/main/yolox_l.onnx", YOLOX_PATH)
         
-    dw_path = os.path.join(DWPOSE_DIR, "dw-ll_ucoco_384.onnx")
-    if not os.path.exists(dw_path) or os.path.getsize(dw_path) == 0:
+    if not os.path.exists(DW_PATH) or os.path.getsize(DW_PATH) == 0:
         print("Downloading DWPose keypoints...")
-        urllib.request.urlretrieve("https://huggingface.co/yzd-v/DWPose/resolve/main/dw-ll_ucoco_384.onnx", dw_path)
+        urllib.request.urlretrieve("https://huggingface.co/yzd-v/DWPose/resolve/main/dw-ll_ucoco_384.onnx", DW_PATH)
         
     # 2. Download MimicMotion Checkpoint
     if not os.path.exists(CKPT_PATH) or os.path.getsize(CKPT_PATH) == 0:
@@ -52,16 +50,6 @@ def ensure_assets():
         print("Downloading SVD XT 1.1 weights...")
         from huggingface_hub import snapshot_download
         snapshot_download(repo_id="vdo/stable-video-diffusion-img2vid-xt-1-1", local_dir=SVD_DIR)
-
-    # 4. Link into both /app/MimicMotion/models and /app/models to satisfy any relative lookup
-    for target_root in [REPO_MODELS_DIR, APP_MODELS_DIR]:
-        os.makedirs(target_root, exist_ok=True)
-        dw_link = os.path.join(target_root, "DWPose")
-        if not os.path.exists(dw_link):
-            os.symlink(DWPOSE_DIR, dw_link)
-        ckpt_link = os.path.join(target_root, "MimicMotion_1-1.pth")
-        if not os.path.exists(ckpt_link):
-            os.symlink(CKPT_PATH, ckpt_link)
 
 def get_or_load_pipeline():
     global PIPELINE
@@ -136,6 +124,14 @@ def handler(event):
         decode_base64_file(motion_video_b64, input_video_path)
 
         pipeline = get_or_load_pipeline()
+        
+        # Override the DWPose detector with absolute file paths
+        from mimicmotion.dwpose.preprocess import dwprocessor
+        from mimicmotion.dwpose.wholebody import Wholebody
+        
+        # Re-initialize pose estimation using exact absolute paths on disk
+        dwprocessor.args = (YOLOX_PATH, DW_PATH, "cuda:0" if torch.cuda.is_available() else "cpu")
+        dwprocessor.pose_estimation = Wholebody(*dwprocessor.args)
         
         from inference import preprocess
         from mimicmotion.utils.utils import save_to_mp4
