@@ -58,7 +58,6 @@ def get_or_load_pipeline():
         
     ensure_assets()
     
-    # Custom Tencent modules that accept pose_latents
     from mimicmotion.modules.unet import UNetSpatioTemporalConditionModel
     from mimicmotion.modules.pose_net import PoseNet
     from mimicmotion.pipelines.pipeline_mimicmotion import MimicMotionPipeline
@@ -137,6 +136,7 @@ def handler(event):
         from inference import preprocess
         from mimicmotion.utils.utils import save_to_mp4
         
+        # 1. Preprocess poses
         pose_pixels, image_pixels = preprocess(
             input_video_path,
             input_image_path,
@@ -147,18 +147,20 @@ def handler(event):
         if pose_pixels.size(0) > num_frames:
             pose_pixels = pose_pixels[:num_frames]
 
-        pose_pixels = pose_pixels.to(dtype=torch.float16)
+        pose_pixels = pose_pixels.to(device=DEVICE, dtype=torch.float16)
 
+        # Convert normalized image to PIL
         pil_images = [TF.to_pil_image(img.to(torch.uint8)) for img in (image_pixels + 1.0) * 127.5]
         
         generator = torch.Generator(device=DEVICE)
         generator.manual_seed(seed)
         
+        # 2. Run diffusion with correct tile_size=16 chunking
         frames = pipeline(
             image=pil_images,
             image_pose=pose_pixels,
             num_frames=pose_pixels.size(0),
-            tile_size=num_frames,
+            tile_size=16,
             tile_overlap=frames_overlap,
             height=pose_pixels.shape[-2],
             width=pose_pixels.shape[-1],
@@ -173,7 +175,11 @@ def handler(event):
             device=DEVICE
         ).frames.cpu()
 
-        save_to_mp4(frames[0], output_video_path, fps=fps)
+        # 3. Format frames correctly for video export
+        video_frames = (frames * 255.0).to(torch.uint8)
+        
+        # Export video (removing the prepended conditioning frame)
+        save_to_mp4(video_frames[0, 1:], output_video_path, fps=fps)
 
         with open(output_video_path, "rb") as f:
             final_b64 = base64.b64encode(f.read()).decode("utf-8")
