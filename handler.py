@@ -36,22 +36,21 @@ def handler(event):
     
     input_image_path = os.path.join(work_dir, "ref_image.png")
     input_video_path = os.path.join(work_dir, "motion_video.mp4")
-    output_video_path = os.path.join(work_dir, "output.mp4")
     config_path = os.path.join(work_dir, "config.yaml")
+    output_dir = os.path.join(work_dir, "outputs")
+    os.makedirs(output_dir, exist_ok=True)
     
     try:
         decode_base64_file(ref_image_b64, input_image_path)
         decode_base64_file(motion_video_b64, input_video_path)
         
-        # Build YAML configuration for MimicMotion inference
         yaml_content = f"""
 base_model_path: "stabilityai/stable-video-diffusion-img2vid-xt-1-1"
 ckpt_path: "/app/MimicMotion/models/MimicMotion_1-1.pth"
 dwpose_dir: "/app/MimicMotion/models/DWPose"
 test_case:
   - ref_image_path: "{input_image_path}"
-    video_path: "{input_video_path}"
-    output_dir: "{work_dir}"
+    ref_video_path: "{input_video_path}"
     num_inference_steps: {num_inference_steps}
     guidance_scale: {guidance_scale}
     fps: {fps}
@@ -60,17 +59,30 @@ test_case:
             f.write(yaml_content)
         
         cmd = [
-            "python", "/app/MimicMotion/inference.py",
-            "--inference_config", config_path
+            "python", "inference.py",
+            "--inference_config", config_path,
+            "--output_dir", output_dir
         ]
         
-        proc = subprocess.run(cmd, capture_output=True, text=True, cwd="/app/MimicMotion")
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd="/app/MimicMotion",
+            env=dict(os.environ, PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:256")
+        )
+        
         if proc.returncode != 0:
-            return {"error": f"MimicMotion failed: {proc.stderr}"}
+            return {"error": f"Inference error: {proc.stderr}\nOutput: {proc.stdout}"}
             
-        generated_files = [os.path.join(work_dir, f) for f in os.listdir(work_dir) if f.endswith(".mp4") and f != "motion_video.mp4"]
+        generated_files = [
+            os.path.join(output_dir, f)
+            for f in os.listdir(output_dir)
+            if f.endswith(".mp4")
+        ]
+        
         if not generated_files:
-            return {"error": "Inference completed but output video file was not found."}
+            return {"error": "Inference completed but output video file was not generated."}
             
         final_video_b64 = encode_file_to_base64(generated_files[0])
         return {
