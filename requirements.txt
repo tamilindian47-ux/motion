@@ -1,6 +1,6 @@
 runpod>=1.7.0
-torch>=2.3.0
-torchvision>=0.18.0
+torch==2.3.0
+torchvision==0.18.0
 diffusers>=0.30.0
 transformers>=4.42.0
 accelerate>=0.32.0
