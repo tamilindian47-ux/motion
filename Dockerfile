@@ -14,9 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN git clone https://github.com/Tencent/MimicMotion.git /app/MimicMotion
 
-# Patch Tencent's PyTorch 2.6 safe_globals unpacking bug in loader.py
-RUN sed -i 's/\*allowed_modules/allowed_modules/g' /app/MimicMotion/mimicmotion/utils/loader.py
-
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
