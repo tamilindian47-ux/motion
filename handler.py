@@ -45,7 +45,7 @@ def handler(event):
         decode_base64_file(motion_video_b64, input_video_path)
         
         yaml_content = f"""
-base_model_path: "stabilityai/stable-video-diffusion-img2vid-xt-1-1"
+base_model_path: "/app/MimicMotion/models/SVD/stable-video-diffusion-img2vid-xt-1-1"
 ckpt_path: "/app/MimicMotion/models/MimicMotion_1-1.pth"
 dwpose_dir: "/app/MimicMotion/models/DWPose"
 test_case:
@@ -82,7 +82,7 @@ test_case:
         ]
         
         if not generated_files:
-            return {"error": "Inference completed but output video file was not generated."}
+            return {"error": "Inference completed but output video was not found."}
             
         final_video_b64 = encode_file_to_base64(generated_files[0])
         return {
