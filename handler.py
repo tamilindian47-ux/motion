@@ -10,8 +10,10 @@ import base64
 import urllib.request
 import torch
 import numpy as np
+import cv2
 from PIL import Image
 import torchvision.transforms.functional as TF
+from einops import rearrange
 import runpod
 
 STORAGE_ROOT = "/runpod-volume" if os.path.exists("/runpod-volume") else "/app/models_cache"
@@ -98,6 +100,49 @@ def decode_base64_file(b64_str: str, output_path: str):
     with open(output_path, "wb") as f:
         f.write(base64.b64decode(b64_str))
 
+def export_frames_to_mp4(frames_tensor: torch.Tensor, output_path: str, fps: int = 15):
+    """
+    Safely exports [Batch, Frames, Channels, Height, Width] or [Frames, Channels, Height, Width]
+    into browser-compatible H.264 MP4 using OpenCV.
+    """
+    if frames_tensor.ndim == 5:
+        frames_tensor = frames_tensor[0]  # [F, C, H, W]
+        
+    # Remove the first reference frame (conditioning frame)
+    if frames_tensor.size(0) > 1:
+        frames_tensor = frames_tensor[1:]
+        
+    # Convert from [F, C, H, W] to [F, H, W, C]
+    frames_np = rearrange(frames_tensor, "f c h w -> f h w c").cpu().float().numpy()
+    
+    # Scale to 0-255 uint8 if normalized
+    if frames_np.max() <= 1.0:
+        frames_np = (frames_np * 255.0).clip(0, 255).astype(np.uint8)
+    else:
+        frames_np = frames_np.clip(0, 255).astype(np.uint8)
+        
+    f, h, w, c = frames_np.shape
+    temp_raw_path = output_path.replace(".mp4", "_raw.mp4")
+    
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(temp_raw_path, fourcc, fps, (w, h))
+    for i in range(f):
+        # Convert RGB to BGR for OpenCV
+        bgr_frame = cv2.cvtColor(frames_np[i], cv2.COLOR_RGB2BGR)
+        out.write(bgr_frame)
+    out.release()
+    
+    # Re-encode with ffmpeg to h264/yuv420p for 100% universal browser playback
+    import subprocess
+    cmd = [
+        "ffmpeg", "-y", "-i", temp_raw_path,
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-crf", "18", output_path
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if os.path.exists(temp_raw_path):
+        os.remove(temp_raw_path)
+
 def handler(event):
     job_input = event.get("input", {})
     ref_image_b64 = job_input.get("ref_image")
@@ -134,7 +179,6 @@ def handler(event):
         dwprocessor.pose_estimation = Wholebody(*dwprocessor.args)
         
         from inference import preprocess
-        from mimicmotion.utils.utils import save_to_mp4
         
         # 1. Preprocess poses
         pose_pixels, image_pixels = preprocess(
@@ -155,7 +199,7 @@ def handler(event):
         generator = torch.Generator(device=DEVICE)
         generator.manual_seed(seed)
         
-        # 2. Run diffusion with correct tile_size=16 chunking
+        # 2. Run diffusion inference with tile_size=16
         frames = pipeline(
             image=pil_images,
             image_pose=pose_pixels,
@@ -175,11 +219,8 @@ def handler(event):
             device=DEVICE
         ).frames.cpu()
 
-        # 3. Format frames correctly for video export
-        video_frames = (frames * 255.0).to(torch.uint8)
-        
-        # Export video (removing the prepended conditioning frame)
-        save_to_mp4(video_frames[0, 1:], output_video_path, fps=fps)
+        # 3. Export to browser-playable H.264 yuv420p MP4
+        export_frames_to_mp4(frames, output_video_path, fps=fps)
 
         with open(output_video_path, "rb") as f:
             final_b64 = base64.b64encode(f.read()).decode("utf-8")
