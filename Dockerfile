@@ -1,62 +1,58 @@
-FROM runpod/base:0.8.1-cuda12.1.0
+FROM runpod/base:0.4.0-cuda11.8.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-WORKDIR /comfyui
+WORKDIR /app
 
-# System dependencies for FFmpeg and OpenCV
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git wget curl ffmpeg libgl1 libglib2.0-0 \
+    ffmpeg libgl1 libglib2.0-0 wget curl unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Clone ComfyUI Core
-RUN git clone https://github.com/comfyanonymous/ComfyUI.git .
+RUN python3 -m pip install --no-cache-dir --upgrade pip && \
+    python3 -m pip install --no-cache-dir "numpy==1.26.4" cython && \
+    python3 -m pip install --no-cache-dir \
+        "onnxruntime-gpu==1.22.0" \
+        "nvidia-cuda-runtime-cu12" \
+        "nvidia-cuda-nvrtc-cu12" \
+        "nvidia-cublas-cu12" \
+        "nvidia-cufft-cu12" \
+        "nvidia-curand-cu12" \
+        "nvidia-cudnn-cu12==9.*" \
+        insightface==0.7.3 \
+        opencv-python-headless pillow requests tqdm runpod && \
+    python3 -m pip install --no-cache-dir "numpy==1.26.4"
 
-# Install all pinned dependencies from requirements.txt
-COPY requirements.txt /comfyui/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN mkdir -p /app/checkpoints && \
+    wget --progress=dot:giga --tries=5 --timeout=60 \
+      -O /app/checkpoints/inswapper_128.onnx \
+      "https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/inswapper_128.onnx"
 
-# Install Custom Nodes (ComfyUI Git repositories)
-WORKDIR /comfyui/custom_nodes
-RUN git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git && \
-    git clone https://github.com/Fannovel16/comfyui_controlnet_aux.git && \
-    git clone https://github.com/ZHO-ZHO-ZHO/ComfyUI-InstantID.git && \
-    git clone https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved.git
+RUN wget --tries=5 --timeout=60 -O /app/checkpoints/face_occluder.onnx \
+      "https://huggingface.co/Rookiehan/facefusion/resolve/main/face_occluder.onnx" \
+    || wget --tries=5 --timeout=60 -O /app/checkpoints/face_occluder.onnx \
+      "https://github.com/facefusion/facefusion-assets/releases/download/models/face_occluder.onnx"; \
+    test -s /app/checkpoints/face_occluder.onnx
 
-WORKDIR /comfyui
+# Added: BiSeNet semantic face parser for pixel-level contact masking
+RUN wget --tries=5 --timeout=60 -O /app/checkpoints/face_parser.onnx \
+      "https://huggingface.co/facefusion/models-3.1.0/resolve/main/bisenet_resnet_18.onnx" \
+    || wget --tries=5 --timeout=60 -O /app/checkpoints/face_parser.onnx \
+      "https://huggingface.co/Rookiehan/facefusion/resolve/main/face_parser.onnx"; \
+    test -s /app/checkpoints/face_parser.onnx
 
-# Download Models into the image layers (No Network Volume required)
-# 1. Uncensored Base SD1.5 Checkpoint
-RUN wget -q --show-progress -O models/checkpoints/realisticVisionV51_v51VAE.safetensors \
-    "https://civitai.com/api/download/models/130072?type=Model&format=SafeTensor"
+RUN wget --tries=5 --timeout=60 -O /app/checkpoints/enhancer.onnx \
+      "https://huggingface.co/facefusion/models-3.0.0/resolve/main/gpen_bfr_512.onnx" \
+    || wget --tries=5 --timeout=60 -O /app/checkpoints/enhancer.onnx \
+      "https://huggingface.co/facefusion/models-3.0.0/resolve/main/gpen_bfr_256.onnx"; \
+    test -s /app/checkpoints/enhancer.onnx
 
-# 2. Fast 4-Step Motion Adapter
-RUN mkdir -p models/animatediff_models && \
-    wget -q --show-progress -O models/animatediff_models/animatediff_lightning_4step.safetensors \
-    "https://huggingface.co/ByteDance/AnimateDiff-Lightning/resolve/main/animatediff_lightning_4step_diffusers.safetensors"
+RUN mkdir -p /root/.insightface/models/buffalo_l && \
+    ( curl -fL --retry 5 --retry-delay 5 -o /tmp/buffalo_l.zip "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip" || \
+      curl -fL --retry 5 --retry-delay 5 -o /tmp/buffalo_l.zip "https://huggingface.co/techwavelaps/aceplus-face/resolve/main/insightface/models/buffalo_l.zip" ) && \
+    unzip -q -o /tmp/buffalo_l.zip -d /root/.insightface/models/buffalo_l && \
+    rm -f /tmp/buffalo_l.zip
 
-# 3. ControlNet Depth Model
-RUN mkdir -p models/controlnet && \
-    wget -q --show-progress -O models/controlnet/control_v11f1p_sd15_depth.pth \
-    "https://huggingface.co/lllyasviel/ControlNet-v1-1/resolve/main/control_v11f1p_sd15_depth.pth"
+COPY handler.py /app/handler.py
 
-# 4. InstantID Adapters & ControlNet
-RUN mkdir -p models/instantid && \
-    wget -q --show-progress -O models/instantid/ip-adapter.bin \
-    "https://huggingface.co/InstantX/InstantID/resolve/main/ip-adapter.bin"
-
-RUN wget -q --show-progress -O models/controlnet/control_instant_id_sd15.bin \
-    "https://huggingface.co/InstantX/InstantID/resolve/main/ControlNetModel/diffusion_pytorch_model.bin"
-
-# 5. Antelopev2 Models for InsightFace (InstantID face analysis)
-RUN mkdir -p models/insightface/models/antelopev2 && \
-    wget -q --show-progress -O /tmp/antelopev2.zip \
-    "https://huggingface.co/MonsterMMORPG/tools/resolve/main/antelopev2.zip" && \
-    unzip -q -o /tmp/antelopev2.zip -d models/insightface/models/antelopev2 && \
-    rm -f /tmp/antelopev2.zip
-
-COPY handler.py /comfyui/handler.py
-COPY workflow_api.json /comfyui/workflow_api.json
-
-CMD ["python3", "-u", "/comfyui/handler.py"]
+CMD ["python3", "-u", "/app/handler.py"]
