@@ -1,203 +1,147 @@
 import base64
+import io
 import os
-import signal
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import time
-import traceback
-from pathlib import Path
 
-import requests
 import runpod
+from PIL import Image, ImageOps
 
 
-JOB_TIMEOUT = int(
-    os.environ.get("JOB_TIMEOUT_SECONDS", "900")
-)
+Image.MAX_IMAGE_PIXELS = 25_000_000
 
-MAX_INPUT_BYTES = int(
-    os.environ.get("MAX_INPUT_BYTES", "268435456")
-)
-
-MAX_INLINE_OUTPUT_BYTES = int(
-    os.environ.get("MAX_INLINE_OUTPUT_BYTES", "5000000")
+MODEL_DIR = os.environ.get(
+    "MODEL_DIR",
+    "/models/Wan2.2-TI2V-5B",
 )
 
 
-def save_media(value, path):
-    if not isinstance(value, str) or not value:
-        raise ValueError("Both photo and video are required.")
+def handler(job):
+    data = job.get("input", {})
 
-    if value.startswith(("https://", "http://")):
-        total_bytes = 0
+    prompt = data.get("prompt", "")
 
-        with requests.get(
-            value,
-            stream=True,
-            timeout=(20, 120),
-        ) as response:
-            response.raise_for_status()
+    if (
+        not isinstance(prompt, str)
+        or not prompt.strip()
+        or len(prompt) > 4000
+    ):
+        raise ValueError(
+            "Provide a nonempty prompt of at most 4000 characters."
+        )
 
-            with path.open("wb") as handle:
-                for chunk in response.iter_content(
-                    chunk_size=1024 * 1024
-                ):
-                    if not chunk:
-                        continue
+    encoded = data.get("image_base64", "")
 
-                    total_bytes += len(chunk)
+    if (
+        not isinstance(encoded, str)
+        or not encoded
+        or len(encoded) > 6_000_000
+    ):
+        raise ValueError(
+            "Provide a base64 image smaller than 6 million characters."
+        )
 
-                    if total_bytes > MAX_INPUT_BYTES:
-                        raise ValueError(
-                            "Input exceeds the worker's size limit."
-                        )
+    if encoded.startswith("data:"):
+        encoded = encoded.split(",", 1)[1]
 
-                    handle.write(chunk)
+    frames = int(data.get("frames", 49))
+    steps = int(data.get("steps", 30))
+    seed = int(data.get("seed", 42))
 
-    else:
-        encoded = value
+    if frames not in (49, 81, 121):
+        raise ValueError("frames must be 49, 81 or 121.")
 
-        if encoded.startswith("data:"):
-            encoded = encoded.split(",", 1)[1]
+    if not 10 <= steps <= 50:
+        raise ValueError("steps must be between 10 and 50.")
 
-        if len(encoded) > MAX_INPUT_BYTES * 4 // 3 + 4:
-            raise ValueError("Base64 input is too large.")
+    if not 0 <= seed < 2**31:
+        raise ValueError("seed must be between 0 and 2147483647.")
 
-        decoded = base64.b64decode(
+    with tempfile.TemporaryDirectory(prefix="wan-") as tmp:
+        image_path = Path(tmp) / "input.png"
+        video_path = Path(tmp) / "output.mp4"
+
+        raw_image = base64.b64decode(
             encoded,
             validate=True,
         )
 
-        path.write_bytes(decoded)
+        with Image.open(io.BytesIO(raw_image)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image.thumbnail((2048, 2048))
+            image.save(image_path)
 
-
-def handler(event):
-    try:
-        job = event.get("input", {})
-
-        restore = job.get("restore", False)
-        restore_weight = float(
-            job.get("restore_weight", 0.3)
+        runpod.serverless.progress_update(
+            job,
+            "Loading model and generating. Check worker logs.",
         )
 
-        if not isinstance(restore, bool):
-            raise ValueError("restore must be true or false.")
+        command = [
+            sys.executable,
+            "generate.py",
+            "--task",
+            "ti2v-5B",
+            "--size",
+            "1280*704",
+            "--ckpt_dir",
+            MODEL_DIR,
+            "--offload_model",
+            "True",
+            "--convert_model_dtype",
+            "--t5_cpu",
+            "--image",
+            str(image_path),
+            "--prompt",
+            prompt,
+            "--frame_num",
+            str(frames),
+            "--sample_steps",
+            str(steps),
+            "--base_seed",
+            str(seed),
+            "--save_file",
+            str(video_path),
+        ]
 
-        if not 0 <= restore_weight <= 1:
-            raise ValueError(
-                "restore_weight must be between 0 and 1."
+        # No shell=True: the prompt is passed as one argument.
+        result = subprocess.run(
+            command,
+            cwd="/app/Wan2.2",
+            timeout=3300,
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Wan generation failed. Inspect the worker logs."
             )
 
-        with tempfile.TemporaryDirectory(
-            prefix="rehiface-job-"
-        ) as temporary_directory:
-            directory = Path(temporary_directory)
+        if not video_path.is_file():
+            raise RuntimeError(
+                "No output MP4 was created. Inspect the worker logs."
+            )
 
-            photo_path = directory / "source.jpg"
-            video_path = directory / "target.mp4"
-            output_path = directory / "result.mp4"
-            log_path = directory / "engine.log"
+        video_bytes = video_path.read_bytes()
 
-            save_media(job.get("photo"), photo_path)
-            save_media(job.get("video"), video_path)
-
-            command = [
-                sys.executable,
-                "/app/runner.py",
-                "--photo",
-                str(photo_path),
-                "--video",
-                str(video_path),
-                "--output",
-                str(output_path),
-                "--restore-weight",
-                str(restore_weight),
-                "--timeout",
-                str(JOB_TIMEOUT),
-            ]
-
-            if restore:
-                command.append("--restore")
-
-            started = time.monotonic()
-
-            with log_path.open("w+", encoding="utf-8") as log:
-                process = subprocess.Popen(
-                    command,
-                    cwd="/opt/rehiface",
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-
-                try:
-                    return_code = process.wait(
-                        timeout=JOB_TIMEOUT + 180
-                    )
-                except subprocess.TimeoutExpired:
-                    os.killpg(
-                        process.pid,
-                        signal.SIGKILL,
-                    )
-                    process.wait()
-
-                    raise RuntimeError(
-                        "Inference exceeded the worker timeout."
-                    )
-
-                log.seek(0, os.SEEK_END)
-                log.seek(max(0, log.tell() - 16000))
-
-                log_tail = log.read()
-
-            if (
-                return_code != 0
-                or not output_path.is_file()
-                or output_path.stat().st_size == 0
-            ):
-                raise RuntimeError(
-                    f"ReHiFace-S failed, exit={return_code}.\n"
-                    f"{log_tail}"
-                )
-
-            output_size = output_path.stat().st_size
-
-            if output_size > MAX_INLINE_OUTPUT_BYTES:
-                raise RuntimeError(
-                    "Video processed but exceeds this trial's "
-                    "inline-delivery limit. Use a shorter clip or "
-                    "implement object-storage output. "
-                    "No automatic quality reduction was performed."
-                )
-
-            result = base64.b64encode(
-                output_path.read_bytes()
-            ).decode("ascii")
-
-            return {
-                "status": "success",
-                "media_type": "video",
-                "base64": result,
-                "metrics": {
-                    "processing_seconds": round(
-                        time.monotonic() - started,
-                        2,
-                    ),
-                    "output_bytes": output_size,
-                },
-            }
-
-    except Exception as exc:
-        traceback.print_exc()
+        if len(video_bytes) > 6_000_000:
+            raise RuntimeError(
+                "MP4 exceeds this starter's inline output limit. "
+                "Use fewer frames or add object storage."
+            )
 
         return {
-            "status": "failed",
-            "error": str(exc),
+            "video_base64": base64.b64encode(
+                video_bytes
+            ).decode("ascii"),
+            "mime_type": "video/mp4",
+            "frames": frames,
+            "fps": 24,
+            "seed": seed,
         }
 
 
 if __name__ == "__main__":
-    runpod.serverless.start(
-        {"handler": handler}
-    )
+    runpod.serverless.start({
+        "handler": handler,
+    })
