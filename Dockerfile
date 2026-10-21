@@ -1,58 +1,51 @@
-FROM runpod/base:0.4.0-cuda11.8.0
+FROM pytorch/pytorch:2.3.1-cuda11.8-cudnn8-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    ca-certificates \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg libgl1 libglib2.0-0 wget curl unzip \
-    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt /app/requirements.txt
 
-RUN python3 -m pip install --no-cache-dir --upgrade pip && \
-    python3 -m pip install --no-cache-dir "numpy==1.26.4" cython && \
-    python3 -m pip install --no-cache-dir \
-        "onnxruntime-gpu==1.22.0" \
-        "nvidia-cuda-runtime-cu12" \
-        "nvidia-cuda-nvrtc-cu12" \
-        "nvidia-cublas-cu12" \
-        "nvidia-cufft-cu12" \
-        "nvidia-curand-cu12" \
-        "nvidia-cudnn-cu12==9.*" \
-        insightface==0.7.3 \
-        opencv-python-headless pillow requests tqdm runpod && \
-    python3 -m pip install --no-cache-dir "numpy==1.26.4"
+RUN python -m pip install --upgrade "pip<25" && \
+    python -m pip install -r /app/requirements.txt
 
-RUN mkdir -p /app/checkpoints && \
-    wget --progress=dot:giga --tries=5 --timeout=60 \
-      -O /app/checkpoints/inswapper_128.onnx \
-      "https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/inswapper_128.onnx"
+# Avoid competing CPU/GPU ONNX Runtime and OpenCV distributions.
+RUN python -m pip uninstall -y \
+        onnxruntime \
+        opencv-python-headless \
+        opencv-contrib-python \
+        opencv-python && \
+    python -m pip install --force-reinstall --no-deps \
+        onnxruntime-gpu==1.16.3 \
+        opencv-python==4.7.0.72
 
-RUN wget --tries=5 --timeout=60 -O /app/checkpoints/face_occluder.onnx \
-      "https://huggingface.co/Rookiehan/facefusion/resolve/main/face_occluder.onnx" \
-    || wget --tries=5 --timeout=60 -O /app/checkpoints/face_occluder.onnx \
-      "https://github.com/facefusion/facefusion-assets/releases/download/models/face_occluder.onnx"; \
-    test -s /app/checkpoints/face_occluder.onnx
+COPY prepare.py /app/prepare.py
 
-# Added: BiSeNet semantic face parser for pixel-level contact masking
-RUN wget --tries=5 --timeout=60 -O /app/checkpoints/face_parser.onnx \
-      "https://huggingface.co/facefusion/models-3.1.0/resolve/main/bisenet_resnet_18.onnx" \
-    || wget --tries=5 --timeout=60 -O /app/checkpoints/face_parser.onnx \
-      "https://huggingface.co/Rookiehan/facefusion/resolve/main/face_parser.onnx"; \
-    test -s /app/checkpoints/face_parser.onnx
+# Downloads source and weights into the image.
+# Google Drive availability/quota can still cause this step to fail.
+RUN python /app/prepare.py
 
-RUN wget --tries=5 --timeout=60 -O /app/checkpoints/enhancer.onnx \
-      "https://huggingface.co/facefusion/models-3.0.0/resolve/main/gpen_bfr_512.onnx" \
-    || wget --tries=5 --timeout=60 -O /app/checkpoints/enhancer.onnx \
-      "https://huggingface.co/facefusion/models-3.0.0/resolve/main/gpen_bfr_256.onnx"; \
-    test -s /app/checkpoints/enhancer.onnx
-
-RUN mkdir -p /root/.insightface/models/buffalo_l && \
-    ( curl -fL --retry 5 --retry-delay 5 -o /tmp/buffalo_l.zip "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip" || \
-      curl -fL --retry 5 --retry-delay 5 -o /tmp/buffalo_l.zip "https://huggingface.co/techwavelaps/aceplus-face/resolve/main/insightface/models/buffalo_l.zip" ) && \
-    unzip -q -o /tmp/buffalo_l.zip -d /root/.insightface/models/buffalo_l && \
-    rm -f /tmp/buffalo_l.zip
-
+COPY runner.py /app/runner.py
 COPY handler.py /app/handler.py
 
-CMD ["python3", "-u", "/app/handler.py"]
+# Build-time checks: these do not execute GPU inference.
+RUN python -m py_compile /app/runner.py /app/handler.py && \
+    cd /opt/rehiface && \
+    python -c "import inference; assert hasattr(inference, 'GenInput'); assert hasattr(inference, 'FaceSwap')" && \
+    python -m pip check && \
+    python -m pip freeze > /app/BUILD_PACKAGES.txt
+
+WORKDIR /opt/rehiface
+
+CMD ["python", "-u", "/app/handler.py"]
