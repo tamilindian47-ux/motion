@@ -245,7 +245,7 @@ def run(args):
                     raise RuntimeError(
                         "Engine returned unexpected frame dimensions: "
                         f"{frame.shape}; expected at least "
-                        f"({height}, {width}, 3)."
+                        f"({height}, {width}, 3)." 
                     )
 
                 pixels = np.ascontiguousarray(
