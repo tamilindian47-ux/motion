@@ -31,8 +31,7 @@ RUN python -m pip install --upgrade "pip<25"
 RUN python -m pip install -r /app/requirements.txt
 
 # Remove conflicting OpenCV distributions and CPU ONNX Runtime.
-# Reinstall the selected wheels because uninstalling overlapping
-# distributions can remove shared package files.
+# Reinstall selected wheels to restore overlapping package files.
 RUN python -m pip uninstall -y \
         onnxruntime \
         opencv-python-headless \
@@ -61,8 +60,7 @@ COPY runner.py /app/runner.py
 COPY handler.py /app/handler.py
 
 # ------------------------------------------------------------
-# Separate validation steps.
-# Each check gets its own Docker build step and error output.
+# Build validation
 # ------------------------------------------------------------
 
 RUN echo "CHECK 1: Python worker syntax" && \
@@ -126,6 +124,59 @@ print('HifiTestOptions import passed.', flush=True)"
 RUN echo "CHECK 7: Upgrade typing-extensions and validate dependencies" && \
     python -m pip install --upgrade "typing-extensions>=4.16.0,<5" && \
     python -m pip check
+
+# ------------------------------------------------------------
+# Fix missing libnvrtc.so for CUDA 11.8 / cuDNN 8
+# ------------------------------------------------------------
+
+RUN python -m pip install --no-deps \
+        nvidia-cuda-nvrtc-cu11==11.8.89
+
+RUN python - <<'PY'
+from pathlib import Path
+import site
+
+candidates = [
+    Path(root) / "nvidia" / "cuda_nvrtc" / "lib"
+    for root in site.getsitepackages()
+]
+
+libdir = next(
+    (
+        path for path in candidates
+        if path.is_dir() and list(path.glob("libnvrtc.so.*"))
+    ),
+    None,
+)
+
+if libdir is None:
+    raise RuntimeError("CUDA 11 NVRTC library directory was not found")
+
+target = sorted(libdir.glob("libnvrtc.so.*"))[0]
+link = libdir / "libnvrtc.so"
+
+if not link.exists():
+    if link.is_symlink():
+        link.unlink()
+    link.symlink_to(target.name)
+
+Path("/etc/ld.so.conf.d/rehiface-nvrtc.conf").write_text(
+    str(libdir) + "\n"
+)
+
+print("NVRTC directory:", libdir, flush=True)
+print("NVRTC link:", link, "->", link.resolve(), flush=True)
+PY
+
+RUN ldconfig
+
+RUN echo "CHECK 8: Load NVRTC and cuDNN inference libraries" && \
+    python -u -c "\
+import ctypes; \
+ctypes.CDLL('libnvrtc.so'); \
+print('NVRTC load passed', flush=True); \
+ctypes.CDLL('libcudnn_cnn_infer.so.8'); \
+print('cuDNN CNN inference library load passed', flush=True)"
 
 RUN python -m pip freeze > /app/BUILD_PACKAGES.txt
 
