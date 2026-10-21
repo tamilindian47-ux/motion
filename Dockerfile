@@ -123,7 +123,8 @@ RUN echo "CHECK 6: Import upstream options" && \
 from options.hifi_test_options import HifiTestOptions; \
 print('HifiTestOptions import passed.', flush=True)"
 
-RUN echo "CHECK 7: Validate installed dependency requirements" && \
+RUN echo "CHECK 7: Upgrade typing-extensions and validate dependencies" && \
+    python -m pip install --upgrade "typing-extensions>=4.16.0,<5" && \
     python -m pip check
 
 RUN python -m pip freeze > /app/BUILD_PACKAGES.txt
