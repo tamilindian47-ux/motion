@@ -1,35 +1,14 @@
---extra-index-url https://download.pytorch.org/whl/cu121
-
-# Core PyTorch + Torchvision (CUDA 12.1)
-torch==2.3.1+cu121
-torchvision==0.18.1+cu121
-torchaudio==2.3.1+cu121
-
-# RunPod Serverless & Communication
-runpod==1.7.7
-requests==2.32.3
-websocket-client==1.8.0
-
-# ComfyUI Core Dependencies
+runpod
 numpy==1.26.4
-Pillow==10.4.0
-scipy==1.13.1
-tqdm==4.66.5
-psutil==6.0.0
-alembic==1.13.2
-safetensors==0.4.4
-aiohttp==3.10.5
-pyyaml==6.0.2
-
-# Custom Nodes Dependencies (ControlNet Aux, VideoHelperSuite, InstantID)
-opencv-python-headless==4.10.0.84
-imageio==2.35.1
-imageio-ffmpeg==0.5.1
+onnxruntime-gpu==1.22.0
+nvidia-cuda-runtime-cu12
+nvidia-cuda-nvrtc-cu12
+nvidia-cublas-cu12
+nvidia-cufft-cu12
+nvidia-curand-cu12
+nvidia-cudnn-cu12==9.*
 insightface==0.7.3
-onnxruntime-gpu==1.18.1
-diffusers==0.30.2
-transformers==4.44.2
-accelerate==0.34.2
-einops==0.8.0
-kornia==0.7.3
-spandrel==0.3.4
+opencv-python-headless
+pillow
+requests
+tqdm
