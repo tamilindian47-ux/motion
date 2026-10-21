@@ -30,8 +30,7 @@ RUN python -m pip install --upgrade "pip<25"
 
 RUN python -m pip install -r /app/requirements.txt
 
-# Remove conflicting OpenCV distributions and CPU ONNX Runtime.
-# Reinstall selected wheels to restore overlapping package files.
+# Remove conflicting distributions, then restore selected wheels.
 RUN python -m pip uninstall -y \
         onnxruntime \
         opencv-python-headless \
@@ -126,7 +125,7 @@ RUN echo "CHECK 7: Upgrade typing-extensions and validate dependencies" && \
     python -m pip check
 
 # ------------------------------------------------------------
-# Fix missing libnvrtc.so for CUDA 11.8 / cuDNN 8
+# Supply CUDA 11.8 NVRTC and its unversioned library link
 # ------------------------------------------------------------
 
 RUN python -m pip install --no-deps \
@@ -169,6 +168,57 @@ print("NVRTC link:", link, "->", link.resolve(), flush=True)
 PY
 
 RUN ldconfig
+
+# ------------------------------------------------------------
+# Register existing CUDA/cuDNN library directories
+# ------------------------------------------------------------
+
+RUN python - <<'PY'
+from pathlib import Path
+
+root = Path("/opt/conda")
+
+patterns = [
+    "libcudnn*.so*",
+    "libcublas*.so*",
+    "libcudart.so*",
+    "libnvrtc.so*",
+]
+
+directories = set()
+cudnn_infer = []
+
+for pattern in patterns:
+    for library in root.rglob(pattern):
+        if library.is_file():
+            directories.add(str(library.parent))
+
+            if library.name.startswith("libcudnn_cnn_infer.so.8"):
+                cudnn_infer.append(str(library))
+
+print("cuDNN CNN inference libraries found:", flush=True)
+
+for library in sorted(cudnn_infer):
+    print(library, flush=True)
+
+if not cudnn_infer:
+    raise RuntimeError(
+        "libcudnn_cnn_infer.so.8 is absent from /opt/conda. "
+        "Library-path registration cannot fix an absent library."
+    )
+
+config = Path("/etc/ld.so.conf.d/rehiface-conda-cuda.conf")
+config.write_text("\n".join(sorted(directories)) + "\n")
+
+print("Registered library directories:", flush=True)
+print(config.read_text(), flush=True)
+PY
+
+RUN ldconfig
+
+# ------------------------------------------------------------
+# Verify standalone library loading
+# ------------------------------------------------------------
 
 RUN echo "CHECK 8: Load NVRTC and cuDNN inference libraries" && \
     python -u -c "\
