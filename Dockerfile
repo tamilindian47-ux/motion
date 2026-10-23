@@ -1,22 +1,28 @@
-# Use the official RunPod ComfyUI base worker
+# Official RunPod ComfyUI Serverless Core
 FROM runpod/worker-comfyui:5.3.0-base
 
-# Install system dependencies cleanly
+# Clean installation of Linux networking utilities
 RUN apt-get update && apt-get install -y git-lfs wget && rm -rf /var/lib/apt/lists/*
 
-# Set up Custom Nodes directories and clone extensions on solid single lines
+# Force explicit working directory for video nodes
 WORKDIR /comfyui/custom_nodes
+
+# Flat commands with absolute URLs to completely avoid Git 128 truncation errors
 RUN git clone https://github.com
 RUN git clone https://github.com
 
-# Install python requirements for the custom nodes
-RUN pip install --no-cache-dir -r ComfyUI-VideoHelperSuite/requirements.txt
-RUN pip install --no-cache-dir -r ComfyUI-WanVideoWrapper/requirements.txt
+# Execute clean PIP installs directly from the isolated directories
+RUN pip install --no-cache-dir -r /comfyui/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt
+RUN pip install --no-cache-dir -r /comfyui/custom_nodes/ComfyUI-WanVideoWrapper/requirements.txt
 
-# Download required models directly into the internal image layer
+# Shift to model paths for asset allocation
 WORKDIR /comfyui/models
+
+# Download the low-overhead Quantized Wan 2.1 Engine (9.5GB)
 RUN wget -O checkpoints/wan2.1_i2v_14b_q4_k_m.safetensors "https://huggingface.co"
+
+# Download the unified Video Decode VAE
 RUN wget -O vae/wan_2.1_vae.safetensors "https://huggingface.co"
 
-# Hand execution control back over to RunPod's internal core script
+# Return directory state back to default RunPod wrapper scope
 WORKDIR /
