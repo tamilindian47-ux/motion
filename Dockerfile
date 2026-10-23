@@ -1,31 +1,28 @@
-FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+# Use the official RunPod ComfyUI base worker (wipes out on teardown, no volumes)
+FROM runpod/worker-comfyui:5.3.0-base
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    TOKENIZERS_PARALLELISM=false \
-    HF_HOME=/tmp/huggingface \
-    MODEL_DIR=/models/wan-turbo
+# Install system dependencies
+RUN apt-get update && apt-get install -y git-lfs wget && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Set up Custom Nodes directories
+WORKDIR /comfyui/custom_nodes
+RUN git clone https://github.com
+RUN git clone https://github.com
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
+# Install requirements for custom nodes
+RUN pip install --no-cache-dir -r ComfyUI-VideoHelperSuite/requirements.txt
+RUN pip install --no-cache-dir -r ComfyUI-WanVideoWrapper/requirements.txt
 
-COPY requirements.txt .
+# Download required models directly into the image footprint
+WORKDIR /comfyui/models
 
-RUN pip install --no-cache-dir -r requirements.txt
+# Download Wan2.1 I2V Quantized Model (Fits inside 24GB VRAM without OOM)
+RUN wget -O checkpoints/wan2.1_i2v_14b_q4_k_m.safetensors \
+    "https://huggingface.co"
 
-ARG MODEL_REVISION=main
+# Download the unified spatial-temporal VAE for Video Decoding
+RUN wget -O vae/wan_2.1_vae.safetensors \
+    "https://huggingface.co"
 
-# Weights are included in the image. No network volume is needed.
-RUN MODEL_REVISION="$MODEL_REVISION" python -c \
-    "import os; from huggingface_hub import snapshot_download; snapshot_download(repo_id='yetter-ai/Wan2.2-TI2V-5B-Turbo-Diffusers', revision=os.environ['MODEL_REVISION'], local_dir='/models/wan-turbo', ignore_patterns=['assets/*', '*.mp4', '*.png', '*.jpg'])"
-
-# Check Python imports during the build; no GPU inference is run.
-RUN python -c \
-    "from diffusers import WanImageToVideoPipeline, UniPCMultistepScheduler, AutoencoderKLWan; import runpod"
-
-COPY handler.py .
-
-CMD ["python", "-u", "handler.py"]
+# Return to root for RunPod's internal boot script
+WORKDIR /
