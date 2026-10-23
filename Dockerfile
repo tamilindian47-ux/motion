@@ -1,40 +1,32 @@
-# Official RunPod ComfyUI Serverless Core
-FROM runpod/worker-comfyui:5.3.0-base
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
-# Install system utilities including unzip
-RUN apt-get update && apt-get install -y wget unzip && rm -rf /var/lib/apt/lists/*
+# Set up system variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
 
-# Force explicit working directory for custom nodes
-WORKDIR /comfyui/custom_nodes
+# Install basic system dependencies
+RUN apt-get update && apt-get install -y \
+    python3-pip python3-dev git ffmpeg libgl1-mesa-glx wget unzip \
+    && rm -rf /var/lib/apt/lists/*
 
-# Environmental block to split domains and avoid platform regex truncations
-ENV REPO_DOMAIN="https://github.com"
-ENV UNGATED_MIRROR="https://huggingface.co"
+# Upgrade pip
+RUN pip3 install --no-cache-dir --upgrade pip
 
-# 1. Download VideoHelperSuite Archive
-RUN wget -O VideoHelperSuite.zip "${REPO_DOMAIN}/Kosinkadink/ComfyUI-VideoHelperSuite/zip/refs/heads/main" \
-    && unzip VideoHelperSuite.zip \
-    && mv ComfyUI-VideoHelperSuite-main ComfyUI-VideoHelperSuite \
-    && rm VideoHelperSuite.zip
+# Install PyTorch with CUDA support
+RUN pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://pytorch.org
 
-# 2. Download WanVideoWrapper Archive
-RUN wget -O WanVideoWrapper.zip "${REPO_DOMAIN}/kijai/ComfyUI-WanVideoWrapper/zip/refs/heads/main" \
-    && unzip WanVideoWrapper.zip \
-    && mv ComfyUI-WanVideoWrapper-main ComfyUI-WanVideoWrapper \
-    && rm WanVideoWrapper.zip
+# Install ComfyUI core requirements and RunPod API wrapper
+RUN pip3 install --no-cache-dir runpod requests>=2.31.0 transformers>=4.44.0 accelerate>=0.33.0 sentencepiece einops av
 
-# Execute clean PIP installs directly from the isolated directories
-RUN pip install --no-cache-dir -r /comfyui/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt
-RUN pip install --no-cache-dir -r /comfyui/custom_nodes/ComfyUI-WanVideoWrapper/requirements.txt
-
-# Shift to model paths for asset allocation
-WORKDIR /comfyui/models
-
-# 3. Download the open, un-gated community mirror of Wan2.1 I2V 14B Q4 (9.5GB)
-RUN wget -O checkpoints/wan2.1_i2v_14b_q4_k_m.safetensors "${UNGATED_MIRROR}/cois/WanVideoWrapper-GGUF/resolve/main/Wan2.1_I2V_14B_Q4_K_M.safetensors"
-
-# 4. Download the open, un-gated community mirror of the Video Decode VAE
-RUN wget -O vae/wan_2.1_vae.safetensors "${UNGATED_MIRROR}/cois/WanVideoWrapper-GGUF/resolve/main/wan_2.1_vae.safetensors"
-
-# Return directory state back to default RunPod wrapper scope
+# Set up project workspace directories
 WORKDIR /
+RUN git clone https://github.com
+
+# Set up runtime asset directories
+RUN mkdir -p /ComfyUI/models/checkpoints /ComfyUI/models/vae
+
+# Copy your production application files into the image container root
+COPY handler.py /handler.py
+
+# Execute the custom python wrapper as the direct system listener
+CMD ["python3", "-u", "/handler.py"]
