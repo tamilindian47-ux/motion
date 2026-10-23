@@ -1,0 +1,75 @@
+{
+  "1": {
+    "inputs": {
+      "image": "input_image.png"
+    },
+    "class_type": "LoadImage"
+  },
+  "2": {
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    },
+    "class_type": "VAELoader"
+  },
+  "3": {
+    "inputs": {
+      "ckpt_name": "wan2.1_i2v_14b_q4_k_m.safetensors"
+    },
+    "class_type": "UNETLoader"
+  },
+  "4": {
+    "inputs": {
+      "text": "Highly detailed physical animation, fluid cinematic movement, masterpiece quality",
+      "clip": ["3", 1]
+    },
+    "class_type": "CLIPTextEncode"
+  },
+  "5": {
+    "inputs": {
+      "text": "static, dead pan, low quality, distorted anatomy, morphing",
+      "clip": ["3", 1]
+    },
+    "class_type": "CLIPTextEncode"
+  },
+  "6": {
+    "inputs": {
+      "width": 832,
+      "height": 480,
+      "length": 81,
+      "image": ["1", 0],
+      "vae": ["2", 0]
+    },
+    "class_type": "WanImageToVideoConditioning"
+  },
+  "7": {
+    "inputs": {
+      "seed": 42,
+      "steps": 30,
+      "cfg": 6.0,
+      "sampler_name": "uni_pc",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "model": ["3", 0],
+      "positive": ["4", 0],
+      "negative": ["5", 0],
+      "latent_image": ["6", 0]
+    },
+    "class_type": "KSampler"
+  },
+  "8": {
+    "inputs": {
+      "samples": ["7", 0],
+      "vae": ["2", 0]
+    },
+    "class_type": "VAEDecode"
+  },
+  "9": {
+    "inputs": {
+      "images": ["8", 0],
+      "filename_prefix": "WanI2V",
+      "fps": 16,
+      "as_gif": false
+    },
+    "class_type": "VHS_VideoCombine"
+  }
+}
